@@ -147,6 +147,7 @@ fun CombatScreen(
     revivesRemaining: Int,
     onPlayCard: (String) -> Unit,
     onPlayTargetedCard: (String, String?) -> Unit = { cardId, _ -> onPlayCard(cardId) },
+    onChooseFollowerTransform: (String) -> Unit = {},
     onEnterAttack: () -> Unit,
     onCancelAttack: () -> Unit,
     onToggleAttacker: (String) -> Unit,
@@ -1831,6 +1832,7 @@ fun CombatScreen(
                 isDragging = isDragging,
                 enablePressElevation = expanded,
                 showDetails = expanded || isDragging || handCard.instanceId == combat.playerHand.lastOrNull()?.instanceId,
+                isFleeting = combat.effectiveIsFleeting(handCard),
                 testTag = "hand_card_${handCard.template.id}",
                 onClick = {
                     if (!expanded) {
@@ -2068,6 +2070,7 @@ fun CombatScreen(
                             descFontSize = descFontSize,
                             statFontSize = statFontSize,
                             enablePressElevation = false,
+                            isFleeting = combat.effectiveIsFleeting(card),
                             onClick = {}
                         )
                     }
@@ -2143,6 +2146,7 @@ fun CombatScreen(
                 padV = vh(1f),
                 descFontSize = descFontSize,
                 manaPreview = inspectPreview,
+                isFleeting = combat.effectiveIsFleeting(card),
                 onPlay = {
                     triggerCardPlayOrTargeting(card, null)
                     inspectedHandCard = null
@@ -2223,6 +2227,12 @@ fun CombatScreen(
                 onAbandonRun()
             },
             onDismiss = { showForfeitConfirm = false }
+        )
+    }
+    combat.pendingTransformChoice?.let { choice ->
+        FollowerTransformChoiceDialog(
+            optionCardIds = choice.optionCardIds,
+            onChoose = onChooseFollowerTransform
         )
     }
     CombatGameOverDialog(

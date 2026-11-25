@@ -1,6 +1,7 @@
 package com.example.engine
 
 import com.example.model.AdventureConfig
+import com.example.model.CardCatalog
 import com.example.model.CardEffectType
 import com.example.model.CardTemplate
 import com.example.model.CardType
@@ -9,6 +10,8 @@ import com.example.model.HandCardInstance
 import com.example.model.Keyword
 import com.example.model.MapNode
 import com.example.model.PowerTemplate
+import com.example.model.Rarity
+import com.example.model.Region
 import com.example.model.RelicTemplate
 import com.example.model.SpellSpeed
 import com.example.model.UnitOnBoard
@@ -35,6 +38,11 @@ data class SpellStackEntry(
     val card: CardTemplate,
     val targetUnitId: String? = null,
     val damageBonus: Int = 0
+)
+
+data class PendingFollowerTransform(
+    val targetUnitInstanceId: String,
+    val optionCardIds: List<String>
 )
 
 data class CombatState(
@@ -136,6 +144,16 @@ data class CombatState(
     val roundTempKeywords: Map<String, Set<Keyword>> = emptyMap(),
     val tempPossessedReturns: Map<String, Boolean> = emptyMap(),
 
+    val startingDeckSize: Int = 18,
+    val deckRegions: Set<Region> = emptySet(),
+    val followersPlayedThisRound: Int = 0,
+    val renewingPowerUsedThisRound: Boolean = false,
+    val stoleEnemyCreatedCardThisRound: Boolean = false,
+    val playerChampionCostReductionEverywhere: Int = 0,
+    val enemyDeckTrapsCount: Int = 0,
+    val playerSlainCount: Int = 0,
+    val pendingTransformChoice: PendingFollowerTransform? = null,
+
     val playerWon: Boolean? = null,
     val combatLog: List<String> = emptyList()
 ) {
@@ -170,14 +188,53 @@ data class CombatState(
 
     fun canPlayCard(card: HandCardInstance): Boolean = CombatEngine.canPlayCard(this, card)
 
+    fun effectiveIsFleeting(card: HandCardInstance): Boolean =
+        card.isFleeting || (card.template.type == CardType.SPELL && activePowers.any { it.id == "P0047" })
+
     fun effectivePlayCost(card: HandCardInstance): Int {
         var cost = card.effectiveCost
         val isSpell = card.template.type == CardType.SPELL
+        val isUnit = card.template.type == CardType.UNIT || card.template.type == CardType.CHAMPION
         if (isSpell && activePowers.any { it.id == "pow_spellslinger" }) {
             cost -= 1
         }
         if (card.isCreated && activePowers.any { it.id == "pow_wild_inspiration" }) {
             cost -= 1
+        }
+        // P0048: Spells cost 2 less; units cost 1 more
+        val p0048Count = activePowers.count { it.id == "P0048" }
+        if (p0048Count > 0) {
+            if (isSpell) cost -= 2 * p0048Count
+            if (isUnit) cost += 1 * p0048Count
+        }
+        // P0680: Epic cards cost 2 less
+        if (card.template.rarity == Rarity.EPIC) {
+            val p0680Count = activePowers.count { it.id == "P0680" }
+            if (p0680Count > 0) cost -= 2 * p0680Count
+        }
+        // P0222: First card played each round costs 1 less for every 20 cards in starting deck
+        if (playerCardsPlayedThisRound == 0) {
+            val p0222Count = activePowers.count { it.id == "P0222" }
+            if (p0222Count > 0) {
+                cost -= (startingDeckSize / 20) * p0222Count
+            }
+        }
+        if (isSpell && equippedRelics.any { it.id == "R0061" }) {
+            val champSpellId = CardCatalog.championSpellIdFor("card_${championId.removePrefix("champ_")}")
+            if (champSpellId != null && card.template.id == champSpellId) {
+                cost -= equippedRelics.count { it.id == "R0061" }
+            }
+        }
+        if (card.template.isChampion) {
+            cost -= playerChampionCostReductionEverywhere
+            val starGemCount = equippedRelics.count { it.id == "R0043" }
+            if (starGemCount > 0) cost -= 2 * starGemCount
+            val discipleCount = equippedRelics.count { it.id == "R0060" }
+            if (discipleCount > 0) cost -= playerBoard.size * discipleCount
+            if (playerPlunderActive) {
+                val plunderCount = equippedRelics.count { it.id == "R0012" || it.id == "R0065" }
+                if (plunderCount > 0) cost -= 2 * plunderCount
+            }
         }
         if (isSpell && playerHand.any { it.template.id == "card_curse_suppression" }) {
             cost += 1
@@ -193,12 +250,17 @@ data class CombatState(
         val isSpellLike = card.template.type == CardType.SPELL || card.template.type == CardType.CURSE
         val spellAvail = playerSpellMana.coerceIn(0, 3)
         val regularAvail = playerMana.coerceIn(0, 10)
+        val payWithHealth = playerCardsPlayedThisRound == 0 && activePowers.any { it.id == "P0752" }
 
-        val spellUsed = if (isSpellLike) minOf(spellAvail, cost) else 0
-        val remainingCost = (cost - spellUsed).coerceAtLeast(0)
-        val regularUsed = minOf(regularAvail, remainingCost)
-        val shortfall = (remainingCost - regularUsed).coerceAtLeast(0)
-        val hasEnoughMana = shortfall == 0
+        val spellUsed = if (!payWithHealth && isSpellLike) minOf(spellAvail, cost) else 0
+        val remainingCost = if (payWithHealth) 0 else (cost - spellUsed).coerceAtLeast(0)
+        val regularUsed = if (payWithHealth) 0 else minOf(regularAvail, remainingCost)
+        val shortfall = if (payWithHealth) {
+            if (playerNexusHp > cost || cost == 0) 0 else (cost - playerNexusHp + 1)
+        } else {
+            (remainingCost - regularUsed).coerceAtLeast(0)
+        }
+        val hasEnoughMana = if (payWithHealth) (cost == 0 || playerNexusHp > cost) else shortfall == 0
         val canPlay = CombatEngine.canPlayCard(this, card)
 
         val isUnitLike = card.template.type == CardType.UNIT ||
@@ -208,7 +270,10 @@ data class CombatState(
             phase == CombatPhase.COMBAT_DECLARE_BLOCK_PHASE
 
         val blockReason = when {
-            !hasEnoughMana -> if (isSpellLike) {
+            pendingTransformChoice != null -> "Hãy chọn bài quân biến đổi trước"
+            !hasEnoughMana -> if (payWithHealth) {
+                "Không đủ Máu Nhà Chính (cần > $cost Máu)"
+            } else if (isSpellLike) {
                 "Không đủ Năng Lượng (thiếu $shortfall NL)"
             } else {
                 "Không đủ NL Thường (thiếu $shortfall NL)"

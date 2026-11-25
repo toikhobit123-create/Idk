@@ -149,6 +149,7 @@ fun PathOfChampionsApp(
                             revivesRemaining = run.revivesRemaining,
                             onPlayCard = { cardId -> viewModel.playCard(cardId) },
                             onPlayTargetedCard = viewModel::playCard,
+                            onChooseFollowerTransform = viewModel::chooseFollowerTransform,
                             onEnterAttack = viewModel::enterAttack,
                             onCancelAttack = viewModel::cancelAttack,
                             onToggleAttacker = viewModel::toggleAttacker,

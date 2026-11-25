@@ -12,6 +12,8 @@ import com.example.model.Keyword
 import com.example.model.MapNode
 import com.example.model.NodeType
 import com.example.model.PowerTemplate
+import com.example.model.Rarity
+import com.example.model.Region
 import com.example.model.RelicTemplate
 import com.example.model.RunState
 import com.example.model.SpellSpeed
@@ -39,6 +41,7 @@ object CombatEngine {
     ): Boolean {
         val expectedPriority = if (isPlayer) PriorityHolder.PLAYER else PriorityHolder.ENEMY
         if (state.priorityHolder != expectedPriority) return false
+        if (isPlayer && state.pendingTransformChoice != null) return false
         if (state.phase == CombatPhase.GAME_OVER || state.phase == CombatPhase.COMBAT_RESOLUTION_PHASE) return false
 
         val type = card.type
@@ -47,16 +50,23 @@ object CombatEngine {
         // Check mana (Regular Mana capped at 10, Spell Mana capped at 3)
         val clampedCost = maxOf(0, effectiveCost)
         val isSpellLike = type == CardType.SPELL || type == CardType.CURSE
-        val available = if (isPlayer) {
-            val regular = state.playerMana.coerceIn(0, 10)
-            val spell = state.playerSpellMana.coerceIn(0, 3)
-            if (isSpellLike) regular + spell else regular
+        val payWithHealth = isPlayer &&
+            state.playerCardsPlayedThisRound == 0 &&
+            state.activePowers.any { it.id == "P0752" }
+        if (payWithHealth) {
+            if (clampedCost > 0 && state.playerNexusHp <= clampedCost) return false
         } else {
-            val regular = state.enemyMana.coerceIn(0, 10)
-            val spell = state.enemySpellMana.coerceIn(0, 3)
-            if (isSpellLike) regular + spell else regular
+            val available = if (isPlayer) {
+                val regular = state.playerMana.coerceIn(0, 10)
+                val spell = state.playerSpellMana.coerceIn(0, 3)
+                if (isSpellLike) regular + spell else regular
+            } else {
+                val regular = state.enemyMana.coerceIn(0, 10)
+                val spell = state.enemySpellMana.coerceIn(0, 3)
+                if (isSpellLike) regular + spell else regular
+            }
+            if (available < clampedCost) return false
         }
-        if (available < clampedCost) return false
 
         // Check board space for units/landmarks
         val board = if (isPlayer) state.playerBoard else state.enemyBoard
@@ -225,7 +235,8 @@ object CombatEngine {
             CardEffectType.DRAIN,
             CardEffectType.FREE_ATTACK,
             CardEffectType.SACRIFICE_DAMAGE,
-            CardEffectType.POSSESS_UNIT -> true
+            CardEffectType.POSSESS_UNIT,
+            CardEffectType.STANCE_SWAP_EFFECT -> true
             else -> false
         }
     }
@@ -257,7 +268,8 @@ object CombatEngine {
             CardEffectType.POSSESS_UNIT -> enemyIds to emptySet()
 
             CardEffectType.GIVE_BARRIER_AND_DRAW,
-            CardEffectType.RALLY_AND_SHIELD -> emptySet<String>() to allyIds
+            CardEffectType.RALLY_AND_SHIELD,
+            CardEffectType.STANCE_SWAP_EFFECT -> emptySet<String>() to allyIds
 
             CardEffectType.FREE_ATTACK ->
                 emptySet<String>() to state.playerBoard.filter { it.template.type != CardType.LANDMARK && it.canAttack }.map { it.instanceId }.toSet()
@@ -336,6 +348,23 @@ object CombatEngine {
                 )
             }
         }
+        val copyRelicsCount = relics.sumOf {
+            when (it.id) {
+                "R0028" -> 2
+                "R0061" -> 7
+                else -> 0
+            }
+        }
+        if (copyRelicsCount > 0) {
+            val champTmpl = CardCatalog.findCardOrNull(
+                CardCatalog.findChampionOrNull(loadout.championId)?.cardId ?: ""
+            )
+            if (champTmpl != null) {
+                repeat(copyRelicsCount) {
+                    expandedDeck.add(createHandInstance(champTmpl, isCreated = true))
+                }
+            }
+        }
         expandedDeck.shuffle()
 
         // Farsight Alteration: pull Farsight cards to top so they are drawn in opening hand
@@ -359,9 +388,17 @@ object CombatEngine {
             }
         }
 
+        val champSpecificManaBonus = relics.sumOf { relic ->
+            when (relic.id) {
+                "R0098" -> if (loadout.championId == "champ_lux") 1 else 0
+                "R0103" -> if (loadout.championId == "champ_yasuo") 1 else 0
+                else -> 0
+            }
+        }
         val startingMana = (1 +
             loadout.startingManaBonus +
-            relics.sumOf { it.startingManaBonus }).coerceIn(1, 3)
+            relics.sumOf { it.startingManaBonus } +
+            champSpecificManaBonus).coerceIn(1, 3)
 
         val startingSpellMana = if (powers.any { it.id == "pow_sorcery" }) 3 else 0
         val celestialStartMana = if (adventure.mutators.any { it.id == "mut_celestial_might" }) 4 else 1
@@ -386,6 +423,7 @@ object CombatEngine {
         val enemyPowerKey = canonicalEnemyPowerKey(node.enemyPowerTitle)
         val effectiveEnemyMaxHp = node.enemyMaxHp + (if (enemyPowerKey == "STONE_WARD") 5 else 0)
 
+        val deckRegions = orderedDeck.map { it.template.region }.toSet()
         var state = CombatState(
             encounterNode = node,
             adventure = adventure,
@@ -414,6 +452,8 @@ object CombatEngine {
             playerDrawPile = remainingDeck,
             enemyHand = openingEnemyHand,
             enemyDrawPool = enemyPool,
+            startingDeckSize = orderedDeck.size,
+            deckRegions = deckRegions,
             combatLog = initialLog
         )
 
@@ -433,7 +473,7 @@ object CombatEngine {
         return syncChampionSpellsInHand(state)
     }
 
-    private fun applyRoundStartHooks(state: CombatState, isGameStart: Boolean): CombatState {
+    internal fun applyRoundStartHooks(state: CombatState, isGameStart: Boolean): CombatState {
         var s = state
         val logs = s.combatLog.toMutableList()
 
@@ -474,14 +514,222 @@ object CombatEngine {
             }
         }
 
-        // Power: Thống Trị
-        if (s.activePowers.any { it.id == "pow_domination" }) {
-            s = s.copy(playerHasAttackToken = true)
+        // Power: Thống Trị (Rare pow_domination hoặc Epic P0112)
+        if (s.activePowers.any { it.id == "pow_domination" || it.id == "P0112" }) {
+            s = grantPlayerAttackToken(s, logs, "Thống Trị")
         }
 
-        // Power: Dòng Chảy Năng Lượng Hoàn Mỹ (+1 ngọc năng lượng khởi đầu trận đấu)
-        if (isGameStart && s.activePowers.any { it.id == "pow_manaflow" }) {
-            s = gainPlayerManaGem(s, empty = false, logs, "Dòng Chảy Năng Lượng Hoàn Mỹ")
+        // Power: Dòng Chảy Năng Lượng Hoàn Mỹ (pow_manaflow) & Dòng Chảy Năng Lượng (P0067)
+        if (isGameStart) {
+            if (s.activePowers.any { it.id == "pow_manaflow" }) {
+                s = gainPlayerManaGem(s, empty = false, logs, "Dòng Chảy Năng Lượng Hoàn Mỹ")
+            }
+            repeat(s.activePowers.count { it.id == "P0067" }) {
+                s = gainPlayerManaGem(s, empty = false, logs, "Dòng Chảy Năng Lượng")
+            }
+            // P0101: Xuất Cổng Thần Tốc - Triệu hồi 1 bài quân 2 tiêu hao từ bộ bài
+            repeat(s.activePowers.count { it.id == "P0101" }) {
+                val twoCostIdx = s.playerDrawPile.indexOfFirst {
+                    (it.template.type == CardType.UNIT || it.template.type == CardType.CHAMPION) &&
+                        it.template.cost == 2
+                }
+                if (twoCostIdx >= 0 && s.playerBoard.size < 6) {
+                    val drawn = s.playerDrawPile[twoCostIdx]
+                    val nextPile = s.playerDrawPile.toMutableList().apply { removeAt(twoCostIdx) }
+                    s = s.copy(playerDrawPile = nextPile)
+                    s = summonPlayerUnit(s, drawn, logs)
+                    logs.add("Xuất Cổng Thần Tốc triệu hồi ${drawn.template.name} từ bộ bài!")
+                }
+            }
+            // P0057: Nguồn Năng Lượng Dự Phòng - Triệu hồi 1 Đài Quan Sát Hextech
+            repeat(s.activePowers.count { it.id == "P0057" }) {
+                if (s.playerBoard.size < 6) {
+                    s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_hextech_observatory")), logs)
+                }
+            }
+            // P0226: Sa Mạc Trường Tồn - Triệu hồi Đĩa Mặt Trời Chôn Vùi & tạo Renekton, Azir hoặc Nasus lên tay
+            repeat(s.activePowers.count { it.id == "P0226" }) {
+                if (s.playerBoard.size < 6) {
+                    s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_buried_sun_disc")), logs)
+                }
+                if (s.playerHand.size < 10) {
+                    val ascendantId = listOf("card_renekton", "card_azir", "card_nasus").random()
+                    val champCard = createHandInstance(CardCatalog.getCard(ascendantId), isCreated = true)
+                    s = s.copy(playerHand = s.playerHand + champCard)
+                    logs.add("Sa Mạc Trường Tồn tạo ${champCard.template.name} lên tay!")
+                }
+            }
+            // P1115: Ảnh Hưởng Của Taarosh - Tạo Kích Darkin + 1 trang bị ngẫu nhiên
+            repeat(s.activePowers.count { it.id == "P1115" }) {
+                if (s.playerHand.size < 10) {
+                    val darkinEquip = attachItemToHandCard(
+                        createHandInstance(CardCatalog.getCard("card_forged_blade"), isCreated = true),
+                        CardCatalog.items.random()
+                    )
+                    s = s.copy(playerHand = s.playerHand + darkinEquip)
+                    logs.add("Ảnh Hưởng Của Taarosh tạo Kích Darkin kèm trang bị lên tay!")
+                }
+            }
+            // P1122: Vượt Ngục! - Tạo 1 lá Vượt Ngục! lên tay
+            repeat(s.activePowers.count { it.id == "P1122" }) {
+                if (s.playerHand.size < 10) {
+                    s = s.copy(playerHand = s.playerHand + createHandInstance(CardCatalog.getCard("card_breakout"), isCreated = true))
+                    logs.add("Vượt Ngục! được tạo lên tay.")
+                }
+            }
+        }
+
+        // Epic Round Start Powers
+        // P0064: Đứng Yên Đó! - Làm Choáng kẻ địch mạnh nhất
+        repeat(s.activePowers.count { it.id == "P0064" }) {
+            val strongestEnemy = s.enemyBoard
+                .filter { it.template.type != CardType.LANDMARK }
+                .filter { !it.isStunned }
+                .maxWithOrNull(compareBy<UnitOnBoard> { it.effectivePower }.thenBy { it.health })
+                ?: s.enemyBoard
+                    .filter { it.template.type != CardType.LANDMARK }
+                    .maxWithOrNull(compareBy<UnitOnBoard> { it.effectivePower }.thenBy { it.health })
+            if (strongestEnemy != null) {
+                s = stunEnemyUnit(s, strongestEnemy.instanceId, logs)
+                logs.add("Đứng Yên Đó! làm Choáng ${strongestEnemy.template.name}.")
+            }
+        }
+        // P0050: Khoan Đã Nào - Làm Choáng đơn vị mạnh nhất và đơn vị yếu nhất trên bàn
+        repeat(s.activePowers.count { it.id == "P0050" }) {
+            val allUnits = (s.playerBoard.map { it to false } + s.enemyBoard.map { it to true })
+                .filter { it.first.template.type != CardType.LANDMARK }
+            val strongest = allUnits.maxWithOrNull(compareBy<Pair<UnitOnBoard, Boolean>> { it.first.effectivePower }.thenBy { it.first.health })
+            val weakest = allUnits.minWithOrNull(compareBy<Pair<UnitOnBoard, Boolean>> { it.first.effectivePower }.thenBy { it.first.health })
+            if (strongest != null) {
+                s = stunUnit(s, strongest.first.instanceId, isEnemy = strongest.second, logs = logs)
+            }
+            if (weakest != null && weakest.first.instanceId != strongest?.first?.instanceId) {
+                s = stunUnit(s, weakest.first.instanceId, isEnemy = weakest.second, logs = logs)
+            }
+        }
+        // P0109: Những Người Bạn Nhỏ - Triệu hồi 1 Poro 1 tiêu hao ngẫu nhiên
+        repeat(s.activePowers.count { it.id == "P0109" }) {
+            if (s.playerBoard.size < 6) {
+                val poroPool = listOf("card_tough_poro", "card_sumpworks_mapper", "card_lonely_poro", "card_nimble_poro")
+                val chosenPoro = CardCatalog.getCard(poroPool.random())
+                s = summonPlayerUnit(s, createHandInstance(chosenPoro), logs)
+            }
+        }
+        // P0045: Nguồn Cung Ổn Định - Triệu hồi 1 Thùng Thuốc Độc
+        repeat(s.activePowers.count { it.id == "P0045" }) {
+            if (s.playerBoard.size < 6) {
+                s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_caustic_cask")), logs)
+            }
+        }
+        // P0043: Luật Nhà - Ban 1 trang bị ngẫu nhiên cho 1 lá bài ngẫu nhiên trên tay
+        repeat(s.activePowers.count { it.id == "P0043" }) {
+            if (s.playerHand.isNotEmpty()) {
+                val idx = Random.nextInt(s.playerHand.size)
+                val updatedHand = s.playerHand.toMutableList()
+                val upgraded = attachItemToHandCard(updatedHand[idx], CardCatalog.items.random())
+                updatedHand[idx] = upgraded
+                s = s.copy(playerHand = updatedHand)
+                logs.add("Luật Nhà ban trang bị cho ${upgraded.template.name} trên tay!")
+            }
+        }
+        // P1007: Mệnh Lệnh Biệt Kích - Nếu bạn có Lượt Tấn Công, ban Trinh Sát cho 1 đồng minh ngẫu nhiên
+        if (s.playerHasAttackToken && s.activePowers.any { it.id == "P1007" }) {
+            val nonLandmarks = s.playerBoard.filter { it.template.type != CardType.LANDMARK }
+            val candidate = nonLandmarks.filter { !it.keywords.contains(Keyword.SCOUT) }.randomOrNull()
+                ?: nonLandmarks.randomOrNull()
+            if (candidate != null) {
+                s = s.copy(playerBoard = s.playerBoard.map {
+                    if (it.instanceId == candidate.instanceId) it.copy(keywords = it.keywords + Keyword.SCOUT) else it
+                })
+                logs.add("Mệnh Lệnh Biệt Kích ban Trinh Sát cho ${candidate.template.name}.")
+            }
+        }
+        // P0558: Sương Mù Dịch Chuyển - Nếu có Lượt Tấn Công, triệu hồi Màn Sương Xâm Chiếm kèm trang bị (+1|+1 mọi nơi)
+        if (s.playerHasAttackToken) {
+            repeat(s.activePowers.count { it.id == "P0558" }) {
+                if (s.playerBoard.size < 6) {
+                    val mistCard = attachItemToHandCard(
+                        createHandInstance(CardCatalog.getCard("card_encroaching_mist"), isCreated = true),
+                        CardCatalog.items.random()
+                    )
+                    s = summonPlayerUnit(s, mistCard, logs)
+                } else {
+                    s = applyEncroachingMistSummonBuff(s, forPlayer = true, logs = logs)
+                }
+            }
+        }
+        // P0555: Bản Chất Biến Ảo - Tạo 1 bài phép Phù Du giá gốc <= 6 thuộc khu vực bộ bài với giá 1 tiêu hao
+        repeat(s.activePowers.count { it.id == "P0555" }) {
+            if (s.playerHand.size < 10) {
+                val regionSpells = CardCatalog.cards.values.filter {
+                    it.type == CardType.SPELL && it.cost <= 6 &&
+                        (s.deckRegions.isEmpty() || it.region in s.deckRegions) &&
+                        it.spellSpeed != SpellSpeed.SKILL
+                }.ifEmpty {
+                    CardCatalog.cards.values.filter { it.type == CardType.SPELL && it.cost <= 6 && it.spellSpeed != SpellSpeed.SKILL }
+                }
+                val spellTmpl = regionSpells.random()
+                val createdSpell = createHandInstance(spellTmpl, isFleeting = true, isCreated = true).copy(effectiveCost = 1)
+                s = s.copy(playerHand = s.playerHand + createdSpell)
+                logs.add("Bản Chất Biến Ảo tạo ${spellTmpl.name} (1 NL, Phù Du).")
+            }
+        }
+        // P0933: Tinh Tú Hồi Đáp - Tạo Khuếch Tán Tinh Tú lên tay hoặc giảm 2 tiêu hao nếu đã có
+        repeat(s.activePowers.count { it.id == "P0933" }) {
+            val existingIdx = s.playerHand.indexOfFirst { it.template.id == "card_astral_diffusion" }
+            if (existingIdx >= 0) {
+                val updatedHand = s.playerHand.toMutableList()
+                val targetCard = updatedHand[existingIdx]
+                updatedHand[existingIdx] = targetCard.copy(effectiveCost = maxOf(0, targetCard.effectiveCost - 2))
+                s = s.copy(playerHand = updatedHand)
+                logs.add("Tinh Tú Hồi Đáp giảm 2 tiêu hao cho Khuếch Tán Tinh Tú!")
+            } else if (s.playerHand.size < 10) {
+                s = s.copy(playerHand = s.playerHand + createHandInstance(CardCatalog.getCard("card_astral_diffusion"), isCreated = true))
+                logs.add("Tinh Tú Hồi Đáp tạo Khuếch Tán Tinh Tú lên tay.")
+            }
+        }
+        // P0232: Cơn Thịnh Nộ Thể Thăng Hoa - Tạo ngẫu nhiên 1 Địa Danh Đếm Ngược Phù Du lên tay
+        repeat(s.activePowers.count { it.id == "P0232" }) {
+            if (s.playerHand.size < 10) {
+                val countdownLandmarks = CardCatalog.cards.values.filter {
+                    it.type == CardType.LANDMARK && it.countdownRounds > 0 && it.id != "card_buried_sun_disc"
+                }
+                if (countdownLandmarks.isNotEmpty()) {
+                    val lm = countdownLandmarks.random()
+                    s = s.copy(playerHand = s.playerHand + createHandInstance(lm, isFleeting = true, isCreated = true))
+                    logs.add("Cơn Thịnh Nộ Thể Thăng Hoa tạo ${lm.name} Phù Du lên tay.")
+                }
+            }
+        }
+        // P0750: Úm Ba La Biến! - Biến đổi các đơn vị của bạn thành tùy tùng ngẫu nhiên có giá gốc cao hơn 3
+        if (s.activePowers.any { it.id == "P0750" }) {
+            val unitIdsToTransform = s.playerBoard
+                .filter { it.template.type != CardType.LANDMARK }
+                .map { it.instanceId }
+            if (unitIdsToTransform.isNotEmpty()) {
+                unitIdsToTransform.forEach { uid ->
+                    val currentUnit = s.playerBoard.find { it.instanceId == uid }
+                    if (currentUnit != null) {
+                        val candidateTmpl = findRandomFollowerWithDelta(currentUnit.template.cost + 3)
+                        s = transformPlayerUnitToTemplate(s, uid, candidateTmpl, logs)
+                    }
+                }
+                logs.add("Úm Ba La Biến! biến đổi toàn bộ đơn vị của bạn!")
+            }
+        }
+        // P0119: Game Start token check
+        if (isGameStart && s.playerHasAttackToken && s.activePowers.any { it.id == "P0119" }) {
+            repeat(s.activePowers.count { it.id == "P0119" }) {
+                if (s.playerBoard.size < 6) {
+                    s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_sapling")), logs)
+                }
+            }
+        }
+        // Đài Quan Sát Hextech (card_hextech_observatory): Nếu có Lượt Tấn Công, rút 1 lá
+        val observatoryCount = s.playerBoard.count { it.template.id == "card_hextech_observatory" && !it.isSilenced }
+        if (observatoryCount > 0 && s.playerHasAttackToken) {
+            repeat(observatoryCount) { s = drawPlayerCard(s) }
+            logs.add("Đài Quan Sát Hextech rút $observatoryCount lá bài!")
         }
 
         // Pipeline 1.1: Kiểm tra Khai Sáng DUY NHẤT tại Đầu Vòng Đấu sau khi nạp lại mana (regularMana >= 10)
@@ -593,17 +841,71 @@ object CombatEngine {
             logs.add("Người Máy Đạn Đạo tạo Tia Lửa Chóng Tàn.")
         }
 
-        // Relic: Archangel's Staff (if leveled or on board)
+        // Game Start Relic: Swain's Raven Army (Drain 5 from enemy Nexus)
+        if (isGameStart) {
+            val drainCount = s.equippedRelics.count { it.id == "R0104" }
+            if (drainCount > 0) {
+                val drainAmt = 5 * drainCount
+                s = dealDamageToEnemyNexus(s, drainAmt, logs)
+                val healed = minOf(s.playerMaxHp, s.playerNexusHp + drainAmt)
+                s = s.copy(playerNexusHp = healed)
+                logs.add("Swain's Raven Army hút $drainAmt Máu từ Nhà Chính địch!")
+            }
+        }
+
+        // Relic: Archangel's Staff (Round Start refill spell mana if champion on board)
         if (s.playerBoard.any { u -> u.template.isChampion } &&
-            s.equippedRelics.any { it.id == "relic_archangels_staff" }
+            s.equippedRelics.any { it.refillSpellManaRoundStart }
         ) {
             s = s.copy(playerSpellMana = 3)
         }
 
-        // Relic: Grand General's Counterplan
+        // Relic: The Gravedigger's Spade (Round Start draw 1 Fleeting)
+        if (!isGameStart && s.equippedRelics.any { it.id == "R0014" } && s.playerHand.size < 10) {
+            val beforeSize = s.playerHand.size
+            s = drawPlayerCard(s)
+            if (s.playerHand.size > beforeSize) {
+                val drawn = s.playerHand.last().copy(isFleeting = true)
+                s = s.copy(playerHand = s.playerHand.dropLast(1) + drawn)
+                logs.add("The Gravedigger's Spade rút 1 lá Phù Du.")
+            }
+        }
+
+        // Relic: Ranger's Command (Round Start if attack token, grant random ally Scout)
+        if (s.playerHasAttackToken && s.equippedRelics.any { it.id == "R0164" } && s.playerBoard.isNotEmpty()) {
+            val candidate = s.playerBoard.filter { !it.keywords.contains(Keyword.SCOUT) }.randomOrNull()
+            if (candidate != null) {
+                s = s.copy(playerBoard = s.playerBoard.map { u ->
+                    if (u.instanceId == candidate.instanceId) u.copy(keywords = u.keywords + Keyword.SCOUT) else u
+                })
+                logs.add("Ranger's Command ban Trinh Sát cho ${candidate.template.name}.")
+            }
+        }
+
+        // Relic: Siphoned Sorrow (Round Start steal up to 3 Health from random enemy)
         if (!isGameStart &&
             s.playerBoard.any { it.template.isChampion } &&
-            s.equippedRelics.any { it.id == "relic_grand_generals" } &&
+            s.equippedRelics.any { it.id == "R0138" } &&
+            s.enemyBoard.any { it.health > 1 }
+        ) {
+            val victim = s.enemyBoard.filter { it.health > 1 }.random()
+            val stolen = minOf(3, victim.health - 1)
+            val champ = s.playerBoard.firstOrNull { it.template.isChampion }
+            if (stolen > 0 && champ != null) {
+                s = s.copy(
+                    enemyBoard = s.enemyBoard.map { if (it.instanceId == victim.instanceId) it.copy(health = it.health - stolen) else it },
+                    playerBoard = s.playerBoard.map {
+                        if (it.instanceId == champ.instanceId) it.copy(health = it.health + stolen, maxHealth = it.maxHealth + stolen) else it
+                    }
+                )
+                logs.add("Siphoned Sorrow hút $stolen Máu từ ${victim.template.name}!")
+            }
+        }
+
+        // Relic: The Grand General's Counterplan
+        if (!isGameStart &&
+            s.playerBoard.any { it.template.isChampion } &&
+            s.equippedRelics.any { it.createChampionSpellRoundStart } &&
             s.playerHand.size < 10
         ) {
             val spellId = when (s.championId) {
@@ -755,6 +1057,11 @@ object CombatEngine {
                 }
             }
 
+            // Enemy Viktor Round Start creates Hex Core Upgrade (interceptable by P0756)
+            if (s.enemyBoard.any { it.template.id == "card_viktor" && !it.isSilenced }) {
+                s = addEnemyCreatedCardToHand(s, CardCatalog.getCard("card_hex_core_upgrade"), logs)
+            }
+
             // Quái Cây (Invasive Hydravine) Đầu Vòng Đấu: Triệu hồi 1 Màn Sương Xâm Chiếm
             val enemyHydraCount = s.enemyBoard.count { it.template.id == "card_invasive_hydravine" && !it.isSilenced }
             repeat(enemyHydraCount) {
@@ -771,16 +1078,13 @@ object CombatEngine {
         }
 
         // Đếm Ngược Địa Danh
+        val completedLandmarks = mutableListOf<UnitOnBoard>()
         val tickedBoard = mutableListOf<UnitOnBoard>()
-        var extraDraws = 0
-        var extraSpellMana = 0
         s.playerBoard.forEach { u ->
             if (u.template.type == CardType.LANDMARK && u.countdownRemaining > 0) {
                 val rem = u.countdownRemaining - 1
                 if (rem <= 0) {
-                    extraDraws += 2
-                    extraSpellMana += 2
-                    logs.add("${u.template.name} hoàn tất Đếm Ngược: Rút 2 lá & +2 Năng Lượng Phép!")
+                    completedLandmarks.add(u)
                 } else {
                     tickedBoard.add(u.copy(countdownRemaining = rem))
                 }
@@ -788,12 +1092,11 @@ object CombatEngine {
                 tickedBoard.add(u)
             }
         }
-        s = s.copy(
-            playerBoard = tickedBoard,
-            playerSpellMana = minOf(3, s.playerSpellMana + extraSpellMana),
-            combatLog = logs.takeLast(16)
-        )
-        repeat(extraDraws) { s = drawPlayerCard(s) }
+        s = s.copy(playerBoard = tickedBoard)
+        completedLandmarks.forEach { lm ->
+            s = completeCountdownLandmark(s, lm, logs)
+        }
+        s = s.copy(combatLog = logs.takeLast(16))
         s = applyDeepBoardBuffs(s, logs)
         s = refreshEvolveAndSeenKeywords(s, logs)
         s = checkChampionLevelUps(s, logs, isRoundStart = !isGameStart)
@@ -813,7 +1116,7 @@ object CombatEngine {
                             power = newPow,
                             health = newHp,
                             maxHealth = newHp,
-                            keywords = aniviaTmpl.keywords + s.equippedRelics.mapNotNull { it.grantedKeyword },
+                            keywords = aniviaTmpl.keywords + s.equippedRelics.flatMap { it.allGrantedKeywords },
                             isLeveledUp = leveled,
                             diedAtLevel = null,
                             hasBarrier = false,
@@ -845,7 +1148,16 @@ object CombatEngine {
         extraBonus: Int = 0
     ): Int {
         if (baseDamage <= 0) return 0
-        val relicBonus = if (sourceIsPlayer) state.equippedRelics.sumOf { it.spellSkillDamageBonus } else 0
+        val relicBonus = if (sourceIsPlayer) {
+            val baseRelic = state.equippedRelics.sumOf { it.spellSkillDamageBonus }
+            val elementalRelic = if (card?.keywords?.contains(Keyword.ELEMENTAL) == true) {
+                state.equippedRelics.sumOf { it.elementalSpellSkillDamageBonus }
+            } else 0
+            val whisperBonus = if (card?.spellSpeed == SpellSpeed.SKILL && state.equippedRelics.any { it.id == "R0137" }) {
+                state.enemyBoard.count { it.isStunned }
+            } else 0
+            baseRelic + elementalRelic + whisperBonus
+        } else 0
         val powerBonus = if (sourceIsPlayer) state.activePowers.sumOf { it.spellSkillDamageBonus } else 0
         val mult = if (sourceIsPlayer && state.championId == "champ_jinx" && state.starLevel >= 6) 2 else 1
         val deadlyMult = if (!sourceIsPlayer && state.mutators.any { it.id == "mut_deadly" }) 2 else 1
@@ -964,11 +1276,18 @@ object CombatEngine {
 
         val cost = maxOf(0, state.effectivePlayCost(card))
         val isSpellLike = card.template.type == CardType.SPELL || card.template.type == CardType.CURSE
+        val wasFirstCardThisRound = state.playerCardsPlayedThisRound == 0
+        val wasNightfall = state.playerCardsPlayedThisRound > 0
+        val payWithHealth = wasFirstCardThisRound && state.activePowers.any { it.id == "P0752" }
 
         val maxRegularMana = maxOf(state.playerMaxMana, state.playerMana).coerceIn(1, 10)
         var newMana = state.playerMana.coerceIn(0, maxRegularMana)
         var newSpellMana = state.playerSpellMana.coerceIn(0, 3)
-        if (isSpellLike) {
+        var nextPlayerNexusHp = state.playerNexusHp
+
+        if (payWithHealth) {
+            nextPlayerNexusHp = maxOf(0, nextPlayerNexusHp - cost)
+        } else if (isSpellLike) {
             val spellUsed = minOf(newSpellMana, cost)
             newSpellMana = (newSpellMana - spellUsed).coerceIn(0, 3)
             newMana = (newMana - (cost - spellUsed)).coerceIn(0, maxRegularMana)
@@ -977,6 +1296,9 @@ object CombatEngine {
         }
 
         val logs = state.combatLog.toMutableList()
+        if (payWithHealth && cost > 0) {
+            logs.add("Lời Nguyền Toàn Tri: Trả $cost Máu Nhà Chính thay Năng Lượng và sao chép ${card.template.name}!")
+        }
         val itemManaRefill = card.attachedItems.sumOf { it.refillManaOnPlay }
         if (itemManaRefill > 0) {
             val refillCap = state.playerMaxMana.coerceIn(1, 10)
@@ -991,6 +1313,7 @@ object CombatEngine {
             isInCombat
 
         var s = state.copy(
+            playerNexusHp = nextPlayerNexusHp,
             playerMana = newMana,
             playerSpellMana = newSpellMana,
             playerHand = state.playerHand.filterNot { it.instanceId == handCardId },
@@ -998,6 +1321,15 @@ object CombatEngine {
             playerFastSpellUsedInCombat = state.playerFastSpellUsedInCombat || usedFastInCombat,
             combatLog = logs
         )
+
+        // P0329: Khi dùng 1 lá bài được tạo ra, giảm 1 tiêu hao cho Tướng đồng minh ở mọi nơi
+        if (card.isCreated) {
+            val p0329Count = s.activePowers.count { it.id == "P0329" }
+            if (p0329Count > 0) {
+                s = s.copy(playerChampionCostReductionEverywhere = s.playerChampionCostReductionEverywhere + p0329Count)
+                logs.add("Ánh Hào Quang Tinh Tú giảm $p0329Count tiêu hao Tướng ở mọi nơi!")
+            }
+        }
 
         // Augment: +1|+0 to existing allied Augment units when playing a created card (before resolution)
         if (card.isCreated) {
@@ -1054,6 +1386,114 @@ object CombatEngine {
                     }
                 }
                 s = summonPlayerUnit(s, card, logs, targetUnitId = targetUnitId)
+                val playedUnitId = s.playerBoard.lastOrNull { it.template.id == card.template.id }?.instanceId
+
+                // P1010: Nhịp Điệu Tuyệt Vọng (Màn Đêm: Yểm 2 U Ám lên kẻ địch yếu nhất)
+                if (wasNightfall &&
+                    (card.template.type == CardType.UNIT || card.template.type == CardType.CHAMPION) &&
+                    s.activePowers.any { it.id == "P1010" }
+                ) {
+                    repeat(s.activePowers.count { it.id == "P1010" }) {
+                        val weakestEnemy = s.enemyBoard
+                            .filter { it.template.type != CardType.LANDMARK }
+                            .minWithOrNull(compareBy<UnitOnBoard> { it.effectivePower }.thenBy { it.health })
+                        if (weakestEnemy != null) {
+                            s = applyGloom(s, weakestEnemy.instanceId, isEnemy = true, stacks = 2, isSpell = false, logs = logs)
+                        }
+                    }
+                }
+
+                // P0897: Thanh Kiếm Darkin khi đánh ra Darkin
+                if (playedUnitId != null && card.template.isDarkin && s.activePowers.any { it.id == "P0897" }) {
+                    s = triggerDarkinStrikePower(s, playedUnitId, logs)
+                }
+
+                // Relic: Cruel Experiments (deal 1 and grant Overwhelm & Impact to played allies with 2+ Health)
+                if (s.equippedRelics.any { it.id == "R0122" } && card.template.type != CardType.LANDMARK) {
+                    val lastUnit = s.playerBoard.lastOrNull()
+                    if (lastUnit != null && lastUnit.health >= 2) {
+                        s = s.copy(playerBoard = s.playerBoard.map { u ->
+                            if (u.instanceId == lastUnit.instanceId) {
+                                u.copy(
+                                    keywords = u.keywords + Keyword.OVERWHELM + Keyword.IMPACT,
+                                    impactStacks = u.impactStacks + 1
+                                )
+                            } else u
+                        })
+                        s = damageUnit(s, lastUnit.instanceId, isEnemy = false, damage = 1, isSpell = false, fromAllyEffect = true, logs = logs)
+                    }
+                }
+                if (card.template.isChampion) {
+                    // P0329: Ánh Hào Quang Tinh Tú - Khi đánh ra 1 Tướng, Thăng Cấp cho Tướng đó
+                    if (s.activePowers.any { it.id == "P0329" } && playedUnitId != null) {
+                        s = levelUpSpecificChampion(s, playedUnitId, logs)
+                    }
+                    // Lost Chapter / Hidden Tome: refill spell mana on Champion play
+                    if (s.equippedRelics.any { it.refillSpellManaOnPlay }) {
+                        s = s.copy(playerSpellMana = 3)
+                        logs.add("Hồi đầy Năng Lượng Phép!")
+                    }
+                    // Great Talons: 6+ base cost unit deals 2 to all enemies and enemy Nexus
+                    if (s.equippedRelics.any { it.id == "R0126" } && card.template.cost >= 6) {
+                        s = dealDamageToEnemyNexus(s, 2, logs)
+                        s.enemyBoard.toList().forEach { e ->
+                            s = damageUnit(s, e.instanceId, isEnemy = true, damage = 2, isSpell = false, logs = logs)
+                        }
+                        logs.add("Great Talons gây 2 sát thương lên toàn bộ địch!")
+                    }
+                    // Frost Breath: Play Frostbite strongest enemy (or ALL if Anivia)
+                    if (s.equippedRelics.any { it.id == "R0143" }) {
+                        if (card.template.id == "card_anivia") {
+                            s.enemyBoard.toList().forEach { e ->
+                                s = frostbiteUnit(s, e.instanceId, isEnemy = true, isSpell = false, fromAllyEffect = false, logs = logs)
+                            }
+                            logs.add("Frost Breath Đóng Băng TẤT CẢ kẻ địch!")
+                        } else {
+                            s.enemyBoard.maxByOrNull { it.effectivePower }?.let { strong ->
+                                s = frostbiteUnit(s, strong.instanceId, isEnemy = true, isSpell = false, fromAllyEffect = false, logs = logs)
+                                logs.add("Frost Breath Đóng Băng ${strong.template.name}!")
+                            }
+                        }
+                    }
+                    // Wicked Harvest: Play deal 3 to all other units
+                    if (s.equippedRelics.any { it.id == "R0090" }) {
+                        val justSummonedId = s.playerBoard.lastOrNull { it.template.id == card.template.id }?.instanceId
+                        s.enemyBoard.toList().forEach { e ->
+                            s = damageUnit(s, e.instanceId, isEnemy = true, damage = 3, isSpell = false, logs = logs)
+                        }
+                        s.playerBoard.toList().forEach { a ->
+                            if (a.instanceId != justSummonedId) {
+                                s = damageUnit(s, a.instanceId, isEnemy = false, damage = 3, isSpell = false, fromAllyEffect = true, logs = logs)
+                            }
+                        }
+                        logs.add("Wicked Harvest gây 3 sát thương lên mọi đơn vị khác!")
+                    }
+                    // Disciple of Shadows: Play deal 3 to all other allies
+                    if (s.equippedRelics.any { it.id == "R0060" }) {
+                        val justSummonedId = s.playerBoard.lastOrNull { it.template.id == card.template.id }?.instanceId
+                        s.playerBoard.toList().forEach { a ->
+                            if (a.instanceId != justSummonedId) {
+                                s = damageUnit(s, a.instanceId, isEnemy = false, damage = 3, isSpell = false, fromAllyEffect = true, logs = logs)
+                            }
+                        }
+                    }
+                    // Utmost Despair: Play grant enemies Gloom (-1|-1)
+                    if (s.equippedRelics.any { it.id == "R0095" }) {
+                        s = s.copy(enemyBoard = s.enemyBoard.map { e ->
+                            e.copy(gloomStacks = e.gloomStacks + 1, power = maxOf(0, e.power - 1), health = e.health - 1, maxHealth = maxOf(1, e.maxHealth - 1))
+                        }.filter { it.health > 0 })
+                        logs.add("Utmost Despair yểm U Ám lên quân địch!")
+                    }
+                    // The Curator's Gatebreaker: Play strike the enemy Nexus
+                    if (s.equippedRelics.any { it.id == "R0038" }) {
+                        val champOnBoard = s.playerBoard.lastOrNull { it.template.id == card.template.id }
+                        if (champOnBoard != null && champOnBoard.strikePower > 0) {
+                            s = dealDamageToEnemyNexus(s, champOnBoard.strikePower, logs)
+                            s = onUnitStrike(s, champOnBoard.instanceId, isPlayerStriker = true, hitNexus = true, logs = logs)
+                            logs.add("The Curator's Gatebreaker: ${champOnBoard.template.name} đánh Nhà Chính địch gây ${champOnBoard.strikePower} sát thương!")
+                        }
+                    }
+                }
                 if (card.template.effectType == CardEffectType.FROSTBITE_TARGET) {
                     val chosen = targetUnitId?.let { id -> s.enemyBoard.find { it.instanceId == id } }
                         ?: s.enemyBoard.maxByOrNull { it.effectivePower }
@@ -1072,8 +1512,33 @@ object CombatEngine {
                         s = refreshEvolveAndSeenKeywords(s, logs)
                     }
                 }
-                // Rule 9.3: Summoning Unit/Landmark passes priority immediately to opponent
-                nextPriority = PriorityHolder.ENEMY
+                // P0752: Lời Nguyền Toàn Tri - Sao chép lá bài đầu tiên dùng mỗi vòng
+                if (payWithHealth && s.playerBoard.size < 6) {
+                    s = summonPlayerUnit(s, card.copy(isCreated = true), logs)
+                    val copyUnitId = s.playerBoard.lastOrNull { it.template.id == card.template.id }?.instanceId
+                    if (card.template.isChampion && copyUnitId != null && s.activePowers.any { it.id == "P0329" }) {
+                        s = levelUpSpecificChampion(s, copyUnitId, logs)
+                    }
+                }
+
+                // P0385: Dòng Thời Gian Hội Tụ - Lần đầu dùng 1 tùy tùng mỗi vòng, chọn 1 trong 3 tùy tùng có tiêu hao +3
+                val triggerTimelineTransform = card.template.type == CardType.UNIT &&
+                    s.followersPlayedThisRound == 0 &&
+                    s.activePowers.any { it.id == "P0385" } &&
+                    playedUnitId != null &&
+                    s.playerBoard.any { it.instanceId == playedUnitId }
+                if (card.template.type == CardType.UNIT) {
+                    s = s.copy(followersPlayedThisRound = s.followersPlayedThisRound + 1)
+                }
+                if (triggerTimelineTransform && playedUnitId != null) {
+                    val optionIds = pickThreeFollowerTransformOptions(card.template.cost + 3)
+                    s = s.copy(pendingTransformChoice = PendingFollowerTransform(playedUnitId, optionIds))
+                    logs.add("Dòng Thời Gian Hội Tụ: Chọn 1 trong 3 tùy tùng để biến đổi ${card.template.name}!")
+                    nextPriority = PriorityHolder.PLAYER
+                } else {
+                    // Rule 9.3: Summoning Unit/Landmark passes priority immediately to opponent
+                    nextPriority = PriorityHolder.ENEMY
+                }
             }
             CardType.EQUIPMENT -> {
                 val host = targetUnitId?.let { id -> s.playerBoard.find { it.instanceId == id } }
@@ -1084,13 +1549,14 @@ object CombatEngine {
                         s = returnEquipmentToHand(s, previousGear, toPlayer = true, logs = logs)
                     }
                     s = triggerFatedOnTarget(s, host.instanceId, sourceIsPlayer = true, logs = logs)
+                    val extraGearBuff = if (s.activePowers.any { it.id == "P0914" } && host.attachedItems.size < 3) 1 else 0
                     s = s.copy(playerBoard = s.playerBoard.map { unit ->
                         if (unit.instanceId == host.instanceId) {
                             val (baseUnit, _) = detachEquipmentFromUnit(unit)
                             baseUnit.copy(
-                                power = baseUnit.power + card.template.basePower,
-                                health = baseUnit.health + card.template.baseHealth,
-                                maxHealth = baseUnit.maxHealth + card.template.baseHealth,
+                                power = baseUnit.power + card.template.basePower + extraGearBuff,
+                                health = baseUnit.health + card.template.baseHealth + extraGearBuff,
+                                maxHealth = baseUnit.maxHealth + card.template.baseHealth + extraGearBuff,
                                 keywords = baseUnit.keywords + card.template.keywords,
                                 hasBarrier = baseUnit.hasBarrier || card.template.keywords.contains(Keyword.BARRIER),
                                 hasSpellShield = baseUnit.hasSpellShield || card.template.keywords.contains(Keyword.SPELLSHIELD),
@@ -1102,6 +1568,9 @@ object CombatEngine {
                     })
                     s = refreshEvolveAndSeenKeywords(s, logs)
                     logs.add("Trang bị ${card.template.name} cho ${host.template.name}!")
+                    if (card.template.isDarkin && s.activePowers.any { it.id == "P0897" }) {
+                        s = triggerDarkinStrikePower(s, host.instanceId, logs)
+                    }
                 }
                 // Rule 9.3: Equipment passes priority immediately to opponent
                 nextPriority = PriorityHolder.ENEMY
@@ -1121,6 +1590,57 @@ object CombatEngine {
                     playerSpellsPlayedThisRound = s.playerSpellsPlayedThisRound + 1
                 )
 
+                // P1006: Năng Lượng Tái Tạo - Lần đầu dùng bài phép >= 6 tiêu hao mỗi vòng, hồi lại Năng Lượng
+                if (card.template.type == CardType.SPELL &&
+                    cost >= 6 &&
+                    !s.renewingPowerUsedThisRound &&
+                    s.activePowers.any { it.id == "P1006" }
+                ) {
+                    val cap = maxOf(s.playerMaxMana, s.playerMana).coerceIn(1, 10)
+                    s = s.copy(
+                        playerMana = minOf(cap, s.playerMana + cost),
+                        renewingPowerUsedThisRound = true
+                    )
+                    logs.add("Năng Lượng Tái Tạo hồi lại $cost Năng Lượng!")
+                }
+
+                // P0047: Giấy Phép Hội Pháp Sư - Tạo 1 Cầu Vồng Tối Thượng Phù Du khi dùng bài phép khác
+                if (card.template.type == CardType.SPELL &&
+                    card.template.id != "card_final_spark" &&
+                    s.activePowers.any { it.id == "P0047" } &&
+                    s.playerHand.size < 10
+                ) {
+                    s = s.copy(playerHand = s.playerHand + createHandInstance(CardCatalog.getCard("card_final_spark"), isFleeting = true, isCreated = true))
+                    logs.add("Giấy Phép Hội Pháp Sư tạo 1 Cầu Vồng Tối Thượng lên tay!")
+                }
+
+                // P0997: Mề Đay Hồi Sinh - Khi dùng Đổi Thế Võ, hồi 2 Máu Nhà Chính và 1 Năng Lượng Phép
+                if ((card.template.id == "card_stance_swap" || card.template.effectType == CardEffectType.STANCE_SWAP_EFFECT) &&
+                    s.activePowers.any { it.id == "P0997" }
+                ) {
+                    s = s.copy(
+                        playerNexusHp = minOf(s.playerMaxHp, s.playerNexusHp + 2),
+                        playerSpellMana = minOf(3, s.playerSpellMana + 1)
+                    )
+                    logs.add("Mề Đay Hồi Sinh hồi 2 Máu Nhà Chính và 1 Năng Lượng Phép!")
+                }
+
+                // P0888: Bài Học Thứ Hai - Hoạt hóa bài phép chỉ nhắm vào đồng minh
+                if (card.template.type == CardType.SPELL &&
+                    s.activePowers.any { it.id == "P0888" } &&
+                    isAllyOnlySpell(s, card.template) &&
+                    s.playerBoard.size < 6
+                ) {
+                    val stat = maxOf(1, card.template.cost)
+                    val animatedTmpl = CardCatalog.getCard("card_animated_spell")
+                    val animatedCard = createHandInstance(animatedTmpl, isCreated = true).copy(
+                        bonusPower = maxOf(0, stat - animatedTmpl.basePower),
+                        bonusHealth = maxOf(0, stat - animatedTmpl.baseHealth)
+                    )
+                    s = summonPlayerUnit(s, animatedCard, logs)
+                    logs.add("Bài Học Thứ Hai hoạt hóa ${card.template.name} thành quân $stat|$stat!")
+                }
+
                 if (card.template.keywords.contains(Keyword.ELEMENTAL)) {
                     s = onPlayerSkillOrElementalPlayed(s, logs, card.template.name)
                 }
@@ -1138,25 +1658,52 @@ object CombatEngine {
                 // Lux 3★: Every 6 spell mana -> Rally + Final Spark
                 if (s.championId == "champ_lux" && s.starLevel >= 3 && s.playerSpellsManaSpent >= 6) {
                     s = s.copy(
-                        playerSpellsManaSpent = s.playerSpellsManaSpent - 6,
-                        playerHasAttackToken = true
+                        playerSpellsManaSpent = s.playerSpellsManaSpent - 6
                     )
+                    s = grantPlayerAttackToken(s, logs, "Lux 3★")
                     if (s.playerHand.size < 10) {
                         s = s.copy(playerHand = s.playerHand + createHandInstance(CardCatalog.getCard("card_final_spark"), true))
                     }
                     logs.add("Lux 3★ kích hoạt: Tập Hợp & tạo Cầu Vồng Tối Thượng!")
                 }
 
+                // P0118: Chia Sẻ Chiến Lợi Phẩm - Sao chép phép đơn mục tiêu lên đồng minh yếu nhất khác
+                val shareTargetId = if (card.template.type == CardType.SPELL &&
+                    requiredPlayerTargetCount(card.template) == 1 &&
+                    targetUnitId != null &&
+                    s.playerBoard.any { it.instanceId == targetUnitId && it.template.type != CardType.LANDMARK } &&
+                    s.activePowers.any { it.id == "P0118" }
+                ) {
+                    s.playerBoard
+                        .filter { it.instanceId != targetUnitId && it.template.type != CardType.LANDMARK }
+                        .minWithOrNull(compareBy<UnitOnBoard> { it.effectivePower }.thenBy { it.health })
+                        ?.instanceId
+                } else null
+
+                val spellCastCount = if (payWithHealth) 2 else 1
+
                 // Rule 9.3: Burst/Focus resolve immediately and KEEP priority; Fast/Slow enter stack and pass priority
                 if (card.template.spellSpeed == SpellSpeed.BURST || card.template.spellSpeed == SpellSpeed.FOCUS) {
-                    s = resolveSingleSpellEffect(
-                        state = s,
-                        card = card.template,
-                        sourceIsPlayer = true,
-                        bonusDmg = 0,
-                        logs = logs,
-                        targetUnitId = targetUnitId
-                    )
+                    repeat(spellCastCount) {
+                        s = resolveSingleSpellEffect(
+                            state = s,
+                            card = card.template,
+                            sourceIsPlayer = true,
+                            bonusDmg = 0,
+                            logs = logs,
+                            targetUnitId = targetUnitId
+                        )
+                        if (shareTargetId != null) {
+                            s = resolveSingleSpellEffect(
+                                state = s,
+                                card = card.template,
+                                sourceIsPlayer = true,
+                                bonusDmg = 0,
+                                logs = logs,
+                                targetUnitId = shareTargetId
+                            )
+                        }
+                    }
                     if (s.phase == CombatPhase.COMBAT_DECLARE_BLOCK_PHASE && nextPhase != CombatPhase.COMBAT_DECLARE_BLOCK_PHASE) {
                         nextPhase = s.phase
                         nextPriority = s.priorityHolder
@@ -1172,14 +1719,30 @@ object CombatEngine {
                     if (fatedTargetId != null) {
                         s = triggerFatedOnTarget(s, fatedTargetId, sourceIsPlayer = true, logs = logs)
                     }
-                    val entry = SpellStackEntry(
-                        id = "st_${nextId()}",
-                        sourceIsPlayer = true,
-                        card = card.template,
-                        targetUnitId = targetUnitId,
-                        damageBonus = 0
-                    )
-                    s = s.copy(spellStack = s.spellStack + entry)
+                    val entries = mutableListOf<SpellStackEntry>()
+                    repeat(spellCastCount) {
+                        entries.add(
+                            SpellStackEntry(
+                                id = "st_${nextId()}",
+                                sourceIsPlayer = true,
+                                card = card.template,
+                                targetUnitId = targetUnitId,
+                                damageBonus = 0
+                            )
+                        )
+                        if (shareTargetId != null) {
+                            entries.add(
+                                SpellStackEntry(
+                                    id = "st_${nextId()}",
+                                    sourceIsPlayer = true,
+                                    card = card.template,
+                                    targetUnitId = shareTargetId,
+                                    damageBonus = 0
+                                )
+                            )
+                        }
+                    }
+                    s = s.copy(spellStack = s.spellStack + entries)
                     nextLastCaster = PriorityHolder.PLAYER
                     if (nextPhase == CombatPhase.MAIN_ACTION_PHASE) {
                         nextPhase = CombatPhase.SPELL_STACK_PHASE
@@ -1219,8 +1782,24 @@ object CombatEngine {
         var keywords = tmpl.keywords + itemKeywords
         if (forceEphemeral) keywords = keywords + Keyword.EPHEMERAL
 
-        if (s.equippedRelics.any { it.id == "relic_troll_kings_crown" }) {
-            keywords = keywords + Keyword.OVERWHELM
+        // Allies aura keywords from Relics (Troll King's Crown, Laurent Bladerack, Pack-A-Punch, The Beast Within)
+        s.equippedRelics.forEach { relic ->
+            if (relic.alliesGrantedKeywords.isNotEmpty()) {
+                keywords = keywords + relic.alliesGrantedKeywords
+            }
+        }
+        // Black Shield: allies gain SpellShield on summon
+        if (s.equippedRelics.any { it.id == "R0114" }) {
+            keywords = keywords + Keyword.SPELLSHIELD
+        }
+        // Spirit of the Buhru: allies costing 1 or less have Overwhelm, Quick Attack, and Fury
+        if (s.equippedRelics.any { it.id == "R0079" } && tmpl.cost <= 1) {
+            keywords = keywords + Keyword.OVERWHELM + Keyword.QUICK_ATTACK + Keyword.FURY
+        }
+        // Strength of Stone: allies gain +0|+1 and Formidable on summon
+        val strengthOfStoneCount = s.equippedRelics.count { it.id == "R0091" }
+        if (strengthOfStoneCount > 0) {
+            keywords = keywords + Keyword.FORMIDABLE
         }
 
         // Hextech Fabricator random keyword
@@ -1229,7 +1808,7 @@ object CombatEngine {
         }
 
         var power = tmpl.basePower + card.bonusPower
-        var health = tmpl.baseHealth + card.bonusHealth
+        var health = tmpl.baseHealth + card.bonusHealth + strengthOfStoneCount
         if (tmpl.id == "card_encroaching_mist") {
             power += s.playerMistStatBonus
             health += s.playerMistStatBonus
@@ -1240,7 +1819,14 @@ object CombatEngine {
         if (tmpl.isChampion) {
             power += s.equippedRelics.sumOf { it.bonusPower }
             health += s.equippedRelics.sumOf { it.bonusHealth }
-            s.equippedRelics.mapNotNull { it.grantedKeyword }.forEach { keywords = keywords + it }
+            s.equippedRelics.flatMap { it.allGrantedKeywords }.forEach { keywords = keywords + it }
+            // Star Gem: Allied champions have +1|+1
+            val starGemCount = s.equippedRelics.count { it.id == "R0043" }
+            power += starGemCount
+            health += starGemCount
+        } else if (tmpl.isDragon && s.equippedRelics.any { it.id == "R0080" }) {
+            // The Beast Within: subtype allies get +1|+1
+            power += 1; health += 1
         }
         if (s.championId == "champ_garen" && s.starLevel >= 2) {
             power += 1; health += 1
@@ -1269,11 +1855,14 @@ object CombatEngine {
         }
 
         // Spirit stack bonus
-        val spiritCount = tmpl.spiritStacks + card.attachedItems.sumOf { it.spiritStacks }
+        val relicSpiritCount = if (tmpl.isChampion) s.equippedRelics.sumOf { it.spiritStacks } else 0
+        val spiritCount = tmpl.spiritStacks + card.attachedItems.sumOf { it.spiritStacks } + relicSpiritCount
         power += spiritCount
         health += spiritCount
 
-        val impactCount = tmpl.impactStacks + card.attachedItems.sumOf { it.impactStacks } +
+        val relicImpactCount = s.equippedRelics.sumOf { it.alliesImpactStacks } +
+            (if (tmpl.isChampion) s.equippedRelics.sumOf { it.impactStacks } else 0)
+        val impactCount = tmpl.impactStacks + card.attachedItems.sumOf { it.impactStacks } + relicImpactCount +
             (if (s.championId == "champ_jinx" && s.starLevel >= 4) 1 else 0)
 
         // Lurk bonus accumulated this match
@@ -1298,14 +1887,87 @@ object CombatEngine {
             evolveApplied = true
         }
 
-        // Power: Evolution (+1|+1 per positive keyword)
-        if (s.activePowers.any { it.id == "pow_evolution" }) {
-            val kwCount = keywords.count { it.isSharablePositive }
-            power += kwCount; health += kwCount
+        // Epic Passive & Summon Stat Auras (non-landmarks)
+        val isAllyUnit = tmpl.type != CardType.LANDMARK
+        if (isAllyUnit) {
+            // P0038: Đồng minh có +3|+3, Áp Đảo và Không Thể Chặn Đòn
+            val p0038Count = s.activePowers.count { it.id == "P0038" }
+            if (p0038Count > 0) {
+                power += 3 * p0038Count
+                health += 3 * p0038Count
+                keywords = keywords + Keyword.OVERWHELM + Keyword.CANT_BLOCK
+            }
+            // P0035: Đồng minh có +2|+2
+            val p0035Count = s.activePowers.count { it.id == "P0035" }
+            if (p0035Count > 0) {
+                power += 2 * p0035Count
+                health += 2 * p0035Count
+            }
+            // P0068: Thiên Tài Của Yipp (1-cost -> +2|+2)
+            if (tmpl.cost == 1) {
+                val p0068Count = s.activePowers.count { it.id == "P0068" }
+                if (p0068Count > 0) {
+                    power += 2 * p0068Count
+                    health += 2 * p0068Count
+                }
+            }
+            // P0375: Kho Bụi Phép (created ally -> +2|+2)
+            if (card.isCreated) {
+                val p0375Count = s.activePowers.count { it.id == "P0375" }
+                if (p0375Count > 0) {
+                    power += 2 * p0375Count
+                    health += 2 * p0375Count
+                }
+                // P0350: Sáu Muỗng Đường (created ally -> +3|+1)
+                val p0350Count = s.activePowers.count { it.id == "P0350" }
+                if (p0350Count > 0) {
+                    power += 3 * p0350Count
+                    health += 1 * p0350Count
+                }
+            }
+            // P0914: Cấy Ghép Điều Khiển Học (+1|+1 per attached item, max 3)
+            val p0914Count = s.activePowers.count { it.id == "P0914" }
+            if (p0914Count > 0) {
+                val itemBonus = minOf(3, card.attachedItems.size) * p0914Count
+                power += itemBonus
+                health += itemBonus
+            }
+            // P0699: Khiên Ánh Dương (Daybreak allies have Tough)
+            if (keywords.contains(Keyword.DAYBREAK) && s.activePowers.any { it.id == "P0699" }) {
+                keywords = keywords + Keyword.TOUGH
+            }
+            // Nasus slay aura (+1|+1 per enemy slain this match)
+            if (tmpl.id == "card_nasus" && s.playerSlainCount > 0) {
+                power += s.playerSlainCount
+                health += s.playerSlainCount
+            }
         }
 
+        // P0451: Quảng Trường Vĩ Đại Hơn (+2|+2, Thách Đấu, 1 từ khóa ngẫu nhiên trong vòng này)
+        var grandPlazaBonusPow = 0
+        var grandPlazaBonusHp = 0
+        val grandPlazaAddedKws = mutableSetOf<Keyword>()
+        if (isAllyUnit && s.activePowers.any { it.id == "P0451" }) {
+            val count = s.activePowers.count { it.id == "P0451" }
+            grandPlazaBonusPow = 2 * count
+            grandPlazaBonusHp = 2 * count
+            power += grandPlazaBonusPow
+            health += grandPlazaBonusHp
+            if (!keywords.contains(Keyword.CHALLENGER)) {
+                keywords = keywords + Keyword.CHALLENGER
+                grandPlazaAddedKws.add(Keyword.CHALLENGER)
+            }
+            val availableKws = Keyword.sharablePool.filterNot { it in keywords }
+            val extraKw = (availableKws.ifEmpty { Keyword.sharablePool }).random()
+            if (!keywords.contains(extraKw)) {
+                keywords = keywords + extraKw
+                grandPlazaAddedKws.add(extraKw)
+            }
+        }
+
+        val unitId = "u_${nextId()}"
         val unit = UnitOnBoard(
-            instanceId = "u_${nextId()}",
+            instanceId = unitId,
             template = tmpl,
             ownerIsPlayer = true,
             power = power,
@@ -1329,21 +1991,75 @@ object CombatEngine {
             s = s.copy(playerSpellMana = minOf(3, s.playerSpellMana + 1))
         }
 
-        // Power: Sharing is Caring
         var updatedBoard = s.playerBoard
-        if (s.activePowers.any { it.id == "pow_sharing_is_caring" }) {
+        // P0115: Sẻ Chia Là Quan Tâm - Chia sẻ từ khóa có lợi cho toàn bộ đồng minh
+        if (s.activePowers.any { it.id == "P0115" }) {
             val sharable = keywords.filter { it.isSharablePositive }.toSet()
-            updatedBoard = updatedBoard.map { existing ->
-                existing.copy(keywords = existing.keywords + sharable)
+            if (sharable.isNotEmpty()) {
+                updatedBoard = updatedBoard.map { existing ->
+                    existing.copy(keywords = existing.keywords + sharable)
+                }
             }
         }
 
+        val updatedTempPow = if (grandPlazaBonusPow > 0) {
+            s.roundTempPowerBuffs + (unitId to ((s.roundTempPowerBuffs[unitId] ?: 0) + grandPlazaBonusPow))
+        } else s.roundTempPowerBuffs
+        val updatedTempHp = if (grandPlazaBonusHp > 0) {
+            s.roundTempHealthBuffs + (unitId to ((s.roundTempHealthBuffs[unitId] ?: 0) + grandPlazaBonusHp))
+        } else s.roundTempHealthBuffs
+        val updatedTempKws = if (grandPlazaAddedKws.isNotEmpty()) {
+            s.roundTempKeywords + (unitId to ((s.roundTempKeywords[unitId] ?: emptySet()) + grandPlazaAddedKws))
+        } else s.roundTempKeywords
+
         s = s.copy(
             playerBoard = updatedBoard + unit,
-            playerUniqueKeywordsSeen = newSeenKeywords
+            playerUniqueKeywordsSeen = newSeenKeywords,
+            roundTempPowerBuffs = updatedTempPow,
+            roundTempHealthBuffs = updatedTempHp,
+            roundTempKeywords = updatedTempKws
         )
+
+        // P0699: Khi 1 đồng minh kích hoạt Hừng Đông, ban +0|+1 cho toàn bộ đồng minh
+        if (isAllyUnit && keywords.contains(Keyword.DAYBREAK) && s.playerCardsPlayedThisRound == 1) {
+            val p0699Count = s.activePowers.count { it.id == "P0699" }
+            if (p0699Count > 0) {
+                s = s.copy(playerBoard = s.playerBoard.map { u ->
+                    if (u.template.type != CardType.LANDMARK) {
+                        u.copy(health = u.health + p0699Count, maxHealth = u.maxHealth + p0699Count)
+                    } else u
+                })
+                logs.add("Khiên Ánh Dương ban +0|+$p0699Count cho toàn bộ đồng minh!")
+            }
+        }
+
         s = refreshEvolveAndSeenKeywords(s, logs)
         logs.add("Triệu hồi ${tmpl.name} (${unit.power}|${unit.health}).")
+
+        // P0063: Màn Chào Sân Bùng Nổ - Gây 1 sát thương lên Nhà Chính địch khi triệu hồi đồng minh
+        if (isAllyUnit && s.activePowers.any { it.id == "P0063" }) {
+            val p0063Count = s.activePowers.count { it.id == "P0063" }
+            s = dealDamageToEnemyNexus(s, p0063Count, logs)
+            logs.add("Màn Chào Sân Bùng Nổ gây $p0063Count sát thương lên Nhà Chính địch!")
+        }
+
+        // P0232: Cơn Thịnh Nộ Thể Thăng Hoa - Đẩy nhanh Địa Danh Đếm Ngược 2 vòng khi triệu hồi
+        if (tmpl.type == CardType.LANDMARK && tmpl.countdownRounds > 0 && s.activePowers.any { it.id == "P0232" }) {
+            val advanceAmt = 2 * s.activePowers.count { it.id == "P0232" }
+            val currentLm = s.playerBoard.find { it.instanceId == unitId }
+            if (currentLm != null) {
+                val rem = currentLm.countdownRemaining - advanceAmt
+                if (rem <= 0) {
+                    s = s.copy(playerBoard = s.playerBoard.filterNot { it.instanceId == unitId })
+                    s = completeCountdownLandmark(s, currentLm, logs)
+                } else {
+                    s = s.copy(playerBoard = s.playerBoard.map {
+                        if (it.instanceId == unitId) it.copy(countdownRemaining = rem) else it
+                    })
+                    logs.add("Cơn Thịnh Nộ Thể Thăng Hoa đẩy nhanh ${tmpl.name} ($rem vòng còn lại).")
+                }
+            }
+        }
 
         // On-Summon Skills & Triggers (Pipelines 3.3 & 4.2)
         when (tmpl.id) {
@@ -1400,6 +2116,26 @@ object CombatEngine {
                     logs.add("Rumul ban +0|+4 cho ${targetAlly.template.name}!")
                 }
             }
+            "card_galio" -> {
+                s = s.copy(playerBoard = s.playerBoard.map { u ->
+                    if (u.template.type != CardType.LANDMARK) {
+                        u.copy(health = u.health + 3, maxHealth = u.maxHealth + 3)
+                    } else u
+                })
+                logs.add("Galio ban +0|+3 cho toàn bộ đồng minh!")
+            }
+            "card_windfarer_hatchling" -> {
+                val nextPow = s.roundTempPowerBuffs.toMutableMap()
+                val nextHp = s.roundTempHealthBuffs.toMutableMap()
+                s = s.copy(playerBoard = s.playerBoard.map { u ->
+                    if (u.instanceId != unitId && u.template.type != CardType.LANDMARK) {
+                        nextPow[u.instanceId] = (nextPow[u.instanceId] ?: 0) + 2
+                        nextHp[u.instanceId] = (nextHp[u.instanceId] ?: 0) + 2
+                        u.copy(power = u.power + 2, health = u.health + 2, maxHealth = u.maxHealth + 2)
+                    } else u
+                }, roundTempPowerBuffs = nextPow, roundTempHealthBuffs = nextHp)
+                logs.add("Rồng Gió Non ban +2|+2 cho đồng minh trong vòng này!")
+            }
             "card_laurent_bladekeeper" -> {
                 val targetAlly = targetUnitId?.let { id ->
                     s.playerBoard.find { it.instanceId == id && it.instanceId != unit.instanceId }
@@ -1439,8 +2175,8 @@ object CombatEngine {
         // Đại Bàng Trinh Sát đang ở trên sân nhận Thách Đấu khi đồng minh khác được triệu hồi
         s = grantFleetfeatherChallengerOnSummon(s, newlySummonedId = unit.instanceId, forPlayer = true)
 
-        // Power: Trifarian Might (5+ Power strikes weakest enemy)
-        if (s.activePowers.any { it.id == "pow_trifarian_might" } && unit.effectivePower >= 5) {
+        // Relic: Stalker's Blade / Scales of Judgment
+        if (tmpl.isChampion && s.equippedRelics.any { it.strikeWeakestOnSummon }) {
             s.enemyBoard.minByOrNull { it.health }?.let { weakest ->
                 s = performNonCombatStrike(
                     state = s,
@@ -1450,29 +2186,47 @@ object CombatEngine {
                     targetIsEnemy = true,
                     logs = logs
                 )
-                logs.add("Sức Mạnh Tam Cực: ${tmpl.name} đánh ${weakest.template.name} gây ${unit.strikePower} sát thương!")
+                logs.add("Cổ Vật Ra Đòn: ${tmpl.name} đánh ${weakest.template.name}!")
             }
         }
-
-        // Relic: Stalker's Blade
-        if (tmpl.isChampion && s.equippedRelics.any { it.id == "relic_stalkers_blade" }) {
+        // Relic: Ravenous Hydra (deal 1 to all enemies)
+        if (tmpl.isChampion && s.equippedRelics.any { it.id == "R0016" }) {
+            s.enemyBoard.toList().forEach { e ->
+                s = damageUnit(s, e.instanceId, isEnemy = true, damage = 1, isSpell = false, logs = logs)
+            }
+            logs.add("Ravenous Hydra gây 1 sát thương lên toàn bộ quân địch!")
+        }
+        // Relic: Everfrost (Stun strongest enemy)
+        if (tmpl.isChampion && s.equippedRelics.any { it.id == "R0018" }) {
+            s.enemyBoard.maxByOrNull { it.effectivePower }?.let { strong ->
+                s = stunEnemyUnit(s, strong.instanceId, logs)
+            }
+        }
+        // Relic: True Ice Flail (Give enemies Vulnerable)
+        if (tmpl.isChampion && s.equippedRelics.any { it.id == "R0039" }) {
+            s = s.copy(enemyBoard = s.enemyBoard.map { it.copy(keywords = it.keywords + Keyword.VULNERABLE) })
+            logs.add("True Ice Flail ban Dễ Tổn Thương cho quân địch!")
+        }
+        // Relic: Whirling Blade (Summon: deal 1 to all enemies and enemy Nexus)
+        if (tmpl.isChampion && s.equippedRelics.any { it.id == "R0160" }) {
+            s = dealDamageToEnemyNexus(s, 1, logs)
+            s.enemyBoard.toList().forEach { e ->
+                s = damageUnit(s, e.instanceId, isEnemy = true, damage = 1, isSpell = false, logs = logs)
+            }
+            logs.add("Whirling Blade gây 1 sát thương lên toàn bộ địch!")
+        }
+        // Relic: Mark of the Kindred (shrink weakest enemy health to 1)
+        if (tmpl.isChampion && s.equippedRelics.any { it.id == "R0185" }) {
             s.enemyBoard.minByOrNull { it.health }?.let { weakest ->
-                s = performNonCombatStrike(
-                    state = s,
-                    strikerId = unit.instanceId,
-                    strikerIsPlayer = true,
-                    targetId = weakest.instanceId,
-                    targetIsEnemy = true,
-                    logs = logs
-                )
-                logs.add("Kiếm Truy Sát: ${tmpl.name} đánh ${weakest.template.name}!")
+                s = s.copy(enemyBoard = s.enemyBoard.map {
+                    if (it.instanceId == weakest.instanceId) it.copy(health = 1, maxHealth = 1) else it
+                })
+                logs.add("Mark of the Kindred giảm máu ${weakest.template.name} xuống 1!")
             }
         }
 
-        // Shadow Totem or Stabilize Ephemeral Copy
-        if (!forceEphemeral && (card.attachedItems.any { it.onSummonEphemeralCopy } ||
-                (tmpl.isChampion && s.activePowers.any { it.id == "pow_stabilize" }))
-        ) {
+        // Shadow Totem Ephemeral Copy
+        if (!forceEphemeral && card.attachedItems.any { it.onSummonEphemeralCopy }) {
             if (s.playerBoard.size < 6) {
                 s = summonPlayerUnit(s, card, logs, forceEphemeral = true)
             }
@@ -1713,7 +2467,7 @@ object CombatEngine {
                         })
                         s = refreshEvolveAndSeenKeywords(s, logs)
                     }
-                    s = s.copy(playerHasAttackToken = true)
+                    s = grantPlayerAttackToken(s, logs, card.name)
                     logs.add("Khiên Vàng Tập Hợp kích hoạt Tập Hợp!")
                 } else {
                     top?.let { chosen ->
@@ -1827,8 +2581,8 @@ object CombatEngine {
             }
             CardEffectType.PLANT_PUFFCAPS -> {
                 if (sourceIsPlayer) {
+                    s = s.copy(enemyDeckTrapsCount = s.enemyDeckTrapsCount + card.effectValue)
                     logs.add("Gieo ${card.effectValue} Bẫy Nấm Độc vào bộ bài địch!")
-                    s = dealDamageToEnemyNexus(s, 1, logs)
                 } else {
                     val updatedPile = s.playerDrawPile.toMutableList()
                     repeat(minOf(card.effectValue, updatedPile.size)) {
@@ -2011,8 +2765,141 @@ object CombatEngine {
                 }
             }
             CardEffectType.RALLY -> {
-                s = if (sourceIsPlayer) s.copy(playerHasAttackToken = true) else s.copy(enemyHasAttackToken = true)
+                if (sourceIsPlayer) {
+                    s = grantPlayerAttackToken(s, logs, card.name)
+                } else {
+                    s = s.copy(enemyHasAttackToken = true)
+                }
                 logs.add("${card.name} kích hoạt Tập Hợp!")
+            }
+            CardEffectType.BREAKOUT_EFFECT -> {
+                val boost = maxOf(1, card.effectValue)
+                if (sourceIsPlayer) {
+                    val nextPow = s.roundTempPowerBuffs.toMutableMap()
+                    val nextKws = s.roundTempKeywords.toMutableMap()
+                    s = s.copy(
+                        playerBoard = s.playerBoard.map { u ->
+                            if (u.template.type != CardType.LANDMARK) {
+                                nextPow[u.instanceId] = (nextPow[u.instanceId] ?: 0) + boost
+                                if (!u.keywords.contains(Keyword.OVERWHELM)) {
+                                    nextKws[u.instanceId] = (nextKws[u.instanceId] ?: emptySet()) + Keyword.OVERWHELM
+                                }
+                                u.copy(
+                                    power = u.power + boost,
+                                    keywords = u.keywords + Keyword.OVERWHELM
+                                )
+                            } else u
+                        },
+                        roundTempPowerBuffs = nextPow,
+                        roundTempKeywords = nextKws
+                    )
+                    s = refreshEvolveAndSeenKeywords(s, logs)
+                    logs.add("${card.name}: Toàn bộ đồng minh nhận +$boost|+0 và Áp Đảo trong vòng này!")
+                } else {
+                    val nextPow = s.roundTempPowerBuffs.toMutableMap()
+                    val nextKws = s.roundTempKeywords.toMutableMap()
+                    s = s.copy(
+                        enemyBoard = s.enemyBoard.map { u ->
+                            if (u.template.type != CardType.LANDMARK) {
+                                nextPow[u.instanceId] = (nextPow[u.instanceId] ?: 0) + boost
+                                if (!u.keywords.contains(Keyword.OVERWHELM)) {
+                                    nextKws[u.instanceId] = (nextKws[u.instanceId] ?: emptySet()) + Keyword.OVERWHELM
+                                }
+                                u.copy(
+                                    power = u.power + boost,
+                                    keywords = u.keywords + Keyword.OVERWHELM
+                                )
+                            } else u
+                        },
+                        roundTempPowerBuffs = nextPow,
+                        roundTempKeywords = nextKws
+                    )
+                }
+            }
+            CardEffectType.ASTRAL_DIFFUSION_EFFECT -> {
+                val boost = maxOf(1, card.effectValue)
+                if (sourceIsPlayer) {
+                    s = s.copy(playerBoard = s.playerBoard.map { u ->
+                        if (u.template.type != CardType.LANDMARK) {
+                            val kw = Keyword.sharablePool.filterNot { it in u.keywords }.randomOrNull()
+                                ?: Keyword.sharablePool.random()
+                            u.copy(
+                                power = u.power + boost,
+                                health = u.health + boost,
+                                maxHealth = u.maxHealth + boost,
+                                keywords = u.keywords + kw
+                            )
+                        } else u
+                    })
+                    s = refreshEvolveAndSeenKeywords(s, logs)
+                    logs.add("${card.name}: Toàn bộ đồng minh nhận +$boost|+$boost và 1 từ khóa ngẫu nhiên!")
+                } else {
+                    s = s.copy(enemyBoard = s.enemyBoard.map { u ->
+                        if (u.template.type != CardType.LANDMARK) {
+                            val kw = Keyword.sharablePool.random()
+                            u.copy(
+                                power = u.power + boost,
+                                health = u.health + boost,
+                                maxHealth = u.maxHealth + boost,
+                                keywords = u.keywords + kw
+                            )
+                        } else u
+                    })
+                }
+            }
+            CardEffectType.STANCE_SWAP_EFFECT -> {
+                val boost = maxOf(1, card.effectValue)
+                val allyBoard = if (sourceIsPlayer) s.playerBoard else s.enemyBoard
+                val chosen = targetUnitId?.let { id -> allyBoard.find { it.instanceId == id } }
+                    ?: allyBoard.filter { it.template.type != CardType.LANDMARK }.maxByOrNull { it.effectivePower }
+                if (chosen != null) {
+                    if (targetUnitId != null) {
+                        s = triggerFatedOnTarget(s, chosen.instanceId, sourceIsPlayer = sourceIsPlayer, logs = logs)
+                    }
+                    s = if (sourceIsPlayer) {
+                        s.copy(playerBoard = s.playerBoard.map { u ->
+                            if (u.instanceId == chosen.instanceId) {
+                                u.copy(
+                                    power = u.power + boost,
+                                    health = u.health + boost,
+                                    maxHealth = u.maxHealth + boost,
+                                    keywords = u.keywords + Keyword.OVERWHELM
+                                )
+                            } else u
+                        })
+                    } else {
+                        s.copy(enemyBoard = s.enemyBoard.map { u ->
+                            if (u.instanceId == chosen.instanceId) {
+                                u.copy(
+                                    power = u.power + boost,
+                                    health = u.health + boost,
+                                    maxHealth = u.maxHealth + boost,
+                                    keywords = u.keywords + Keyword.OVERWHELM
+                                )
+                            } else u
+                        })
+                    }
+                    if (sourceIsPlayer) {
+                        s = refreshEvolveAndSeenKeywords(s, logs)
+                    }
+                    logs.add("${card.name} ban +$boost|+$boost và Áp Đảo cho ${chosen.template.name}!")
+                }
+            }
+            CardEffectType.BUFF_ALLIES_STATS -> {
+                val boost = maxOf(0, card.effectValue)
+                val targetBoard = if (sourceIsPlayer) s.playerBoard else s.enemyBoard
+                val updatedBoard = targetBoard.map { u ->
+                    if (u.template.type != CardType.LANDMARK) {
+                        val kw = Keyword.sharablePool.filterNot { it in u.keywords }.randomOrNull()
+                        u.copy(
+                            power = u.power + boost,
+                            health = u.health + boost,
+                            maxHealth = u.maxHealth + boost,
+                            keywords = if (kw != null) u.keywords + kw else u.keywords
+                        )
+                    } else u
+                }
+                s = if (sourceIsPlayer) s.copy(playerBoard = updatedBoard) else s.copy(enemyBoard = updatedBoard)
             }
             CardEffectType.FREE_ATTACK -> {
                 val ownBoard = if (sourceIsPlayer) s.playerBoard else s.enemyBoard
@@ -2261,12 +3148,24 @@ object CombatEngine {
         // 3. Support: each attacker with Support buffs the ally immediately to its right (left-to-right)
         s = applyAttackSupportBuffs(s, s.attackingUnitIds, playerIsAttacking = true, logs = logs)
 
-        // Guinsoo's Rageblade & Ashe Attack triggers
+        // Guinsoo's Rageblade, Whirling Blade, Twin Drakehounds, Shock & Awe & Ashe Attack triggers
         attackers.forEach { atk ->
-            if (atk.template.isChampion && s.equippedRelics.any { it.id == "relic_guinsoos_rageblade" }) {
+            if (atk.template.isChampion && s.equippedRelics.any { it.attackGainPlusOnePlusOne }) {
                 s = s.copy(playerBoard = s.playerBoard.map {
                     if (it.instanceId == atk.instanceId) it.copy(power = it.power + 1, health = it.health + 1, maxHealth = it.maxHealth + 1) else it
                 })
+            }
+            if (atk.template.isChampion && s.equippedRelics.any { it.id == "R0160" }) {
+                s = dealDamageToEnemyNexus(s, 1, logs)
+                s.enemyBoard.toList().forEach { e ->
+                    s = damageUnit(s, e.instanceId, isEnemy = true, damage = 1, isSpell = false, logs = logs)
+                }
+            }
+            if (atk.template.isChampion && s.equippedRelics.any { it.id == "R0120" }) {
+                s = dealDamageToEnemyNexus(s, 2, logs)
+            }
+            if (atk.template.cost <= 1 && s.equippedRelics.any { it.id == "R0100" }) {
+                s = dealDamageToEnemyNexus(s, 1, logs)
             }
             if (atk.template.id == "card_ashe" && !atk.isSilenced) {
                 val target = s.enemyBoard.filter { !it.isFrostbitten }.maxByOrNull { it.effectivePower }
@@ -2304,7 +3203,43 @@ object CombatEngine {
             }
         }
 
-        val survivingAttackerIds = s.attackingUnitIds.filter { id ->
+        // Azir / Cythria / Sand Soldier attack triggers
+        var extraAttackerIds = emptyList<String>()
+        if (s.playerBoard.any { it.template.id == "card_azir" && !it.isSilenced } && s.playerBoard.size < 6) {
+            s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_sand_soldier")), logs)
+            s.playerBoard.lastOrNull { it.template.id == "card_sand_soldier" }?.let { soldier ->
+                extraAttackerIds = extraAttackerIds + soldier.instanceId
+            }
+        }
+        val sandSoldierAtkCount = attackers.count { it.template.id == "card_sand_soldier" && !it.isSilenced } + extraAttackerIds.size
+        if (sandSoldierAtkCount > 0) {
+            s = dealDamageToEnemyNexus(s, sandSoldierAtkCount, logs)
+            logs.add("Lính Cát gây $sandSoldierAtkCount sát thương lên Nhà Chính địch!")
+        }
+        if (attackers.any { it.template.id == "card_cythria_the_bold" && !it.isSilenced }) {
+            val cythriaId = attackers.first { it.template.id == "card_cythria_the_bold" }.instanceId
+            val nextPow = s.roundTempPowerBuffs.toMutableMap()
+            val nextHp = s.roundTempHealthBuffs.toMutableMap()
+            val nextKws = s.roundTempKeywords.toMutableMap()
+            s = s.copy(
+                playerBoard = s.playerBoard.map { u ->
+                    if (u.instanceId != cythriaId && u.template.type != CardType.LANDMARK) {
+                        nextPow[u.instanceId] = (nextPow[u.instanceId] ?: 0) + 1
+                        nextHp[u.instanceId] = (nextHp[u.instanceId] ?: 0) + 1
+                        if (!u.keywords.contains(Keyword.FEARSOME)) {
+                            nextKws[u.instanceId] = (nextKws[u.instanceId] ?: emptySet()) + Keyword.FEARSOME
+                        }
+                        u.copy(power = u.power + 1, health = u.health + 1, maxHealth = u.maxHealth + 1, keywords = u.keywords + Keyword.FEARSOME)
+                    } else u
+                },
+                roundTempPowerBuffs = nextPow,
+                roundTempHealthBuffs = nextHp,
+                roundTempKeywords = nextKws
+            )
+            logs.add("Cithria Hùng Mạnh ban +1|+1 và Đáng Sợ cho đồng minh!")
+        }
+
+        val survivingAttackerIds = (s.attackingUnitIds + extraAttackerIds).distinct().filter { id ->
             s.playerBoard.any { it.instanceId == id && !it.isStunned }
         }
         val lockedBlocks = s.challengedPairings.filter { (atkId, enemyId) ->
@@ -2403,9 +3338,11 @@ object CombatEngine {
         s = resolveCombatResolution(s, playerIsAttacking = true, logs = logs)
         val scoutRally = s.pendingScoutRally
         val postCombatPriority = if (scoutRally) PriorityHolder.PLAYER else PriorityHolder.ENEMY
+        if (scoutRally) {
+            s = grantPlayerAttackToken(s, logs, "Trinh Sát")
+        }
         return checkGameOver(
             s.copy(
-                playerHasAttackToken = s.playerHasAttackToken || scoutRally,
                 pendingScoutRally = false,
                 isFreeAttack = false,
                 blockCommitted = false,
@@ -2984,9 +3921,31 @@ object CombatEngine {
                 updatedMaxHp += 1
                 logs.add("Bền Bỉ (4★): ${target.template.name} sống sót qua sát thương và nhận +1|+1!")
             }
+            var extraGrantedKws = target.keywords
+            if (!isEnemy && actualDmg > 0 && target.template.isChampion) {
+                val buckleCount = state.equippedRelics.count { it.id == "R0019" }
+                if (buckleCount > 0) {
+                    val buff = 2 * buckleCount
+                    newPow += buff
+                    finalHp += buff
+                    updatedMaxHp += buff
+                    logs.add("The Berserker's Buckle: ${target.template.name} nhận +$buff|+$buff!")
+                }
+                val plateCount = state.equippedRelics.count { it.id == "R0159" }
+                if (plateCount > 0) {
+                    val buff = 3 * plateCount
+                    newPow += buff
+                    finalHp += buff
+                    updatedMaxHp += buff
+                    extraGrantedKws = extraGrantedKws + Keyword.sharablePool.random()
+                    logs.add("Sentinel's Plate: ${target.template.name} nhận +$buff|+$buff và từ khóa mới!")
+                }
+            }
 
             val updated = board.map {
-                if (it.instanceId == unitId) it.copy(health = finalHp, maxHealth = updatedMaxHp, power = newPow) else it
+                if (it.instanceId == unitId) {
+                    it.copy(health = finalHp, maxHealth = updatedMaxHp, power = newPow, keywords = extraGrantedKws)
+                } else it
             }
             var s = if (isEnemy) state.copy(enemyBoard = updated) else state.copy(playerBoard = updated)
 
@@ -3089,7 +4048,7 @@ object CombatEngine {
                 s = returnEquipmentToHand(s, target.equippedGear, toPlayer = !isEnemy, logs = logs)
             }
             if (lastBreathRally) {
-                s = if (!isEnemy) s.copy(playerHasAttackToken = true) else s.copy(enemyHasAttackToken = true)
+                s = if (!isEnemy) grantPlayerAttackToken(s, logs, "Trăn Trối Tập Hợp") else s.copy(enemyHasAttackToken = true)
                 logs.add("Trăn Trối Tập Hợp: Nhận Biểu Tượng Tấn Công!")
             }
             s = releaseCapturedUnits(s, target, logs)
@@ -3144,7 +4103,7 @@ object CombatEngine {
             logs.add("Trăng Trối Anivia (Lv$diedLvl): Biến đổi thành Trứng Anivia (0|2)!")
             s = s.copy(playerBoard = s.playerBoard.map { if (it.instanceId == unitId) egg else it })
             if (lastBreathRally) {
-                s = s.copy(playerHasAttackToken = true)
+                s = grantPlayerAttackToken(s, logs, "Trăn Trối Tập Hợp")
                 logs.add("Trăn Trối Tập Hợp: Nhận Biểu Tượng Tấn Công!")
             }
             s = releaseCapturedUnits(s, target, logs)
@@ -3156,7 +4115,13 @@ object CombatEngine {
         s = if (isEnemy) {
             s.copy(
                 enemyBoard = updated,
-                enemyGraveyard = s.enemyGraveyard + target.template
+                enemyGraveyard = s.enemyGraveyard + target.template,
+                playerSlainCount = s.playerSlainCount + 1,
+                playerBoard = s.playerBoard.map { u ->
+                    if (u.template.id == "card_nasus" && !u.isSilenced) {
+                        u.copy(power = u.power + 1, health = u.health + 1, maxHealth = u.maxHealth + 1)
+                    } else u
+                }
             )
         } else {
             s.copy(
@@ -3170,24 +4135,70 @@ object CombatEngine {
         s = releaseCapturedUnits(s, target, logs)
         logs.add("${target.template.name} đã bị hạ gục.")
 
+        // Thùng Thuốc Độc (Caustic Cask) Last Breath -> gây 1 sát thương lên cả 2 Nhà Chính
+        if (!target.isSilenced && target.template.id == "card_caustic_cask") {
+            s = dealDamageToEnemyNexus(s, 1, logs)
+            s = dealDamageToPlayerNexus(s, 1, logs)
+            logs.add("Thùng Thuốc Độc phát nổ gây 1 sát thương lên cả 2 Nhà Chính!")
+        }
+
         // Pipeline 4.2: Linh Hồn Lạc Lối Last Breath -> Tạo 1 Song Kiếm Ác Quỷ lên tay
         if (!target.isSilenced && target.template.id == "card_lost_soul") {
             val revenantTmpl = CardCatalog.getCard("card_twinblade_revenant")
             if (!isEnemy && s.playerHand.size < 10) {
                 s = s.copy(playerHand = s.playerHand + createHandInstance(revenantTmpl, isCreated = true))
                 logs.add("Trăn Trối Linh Hồn Lạc Lối: Tạo Song Kiếm Ác Quỷ lên tay!")
-            } else if (isEnemy && s.enemyHand.size < 10) {
-                s = s.copy(enemyHand = s.enemyHand + revenantTmpl)
+            } else if (isEnemy) {
+                s = addEnemyCreatedCardToHand(s, revenantTmpl, logs)
             }
         }
 
         if (lastBreathRally) {
-            s = if (!isEnemy) s.copy(playerHasAttackToken = true) else s.copy(enemyHasAttackToken = true)
+            s = if (!isEnemy) grantPlayerAttackToken(s, logs, "Trăn Trối Tập Hợp") else s.copy(enemyHasAttackToken = true)
             logs.add("Trăn Trối Tập Hợp: Nhận Biểu Tượng Tấn Công!")
         }
 
         // Ghi nhận đồng minh hy sinh trong vòng (Speaker, Hoàng Đế Thống Trị, Viego)
         s = recordUnitDeathSideEffects(s, target, isEnemy = isEnemy, logs = logs)
+
+        // Relic & Epic Power on Ally Death
+        if (!isEnemy) {
+            // P0378: Kế Thừa - Ban Sức Mạnh của đồng minh hy sinh cho 1 bài quân trên tay
+            repeat(s.activePowers.count { it.id == "P0378" }) {
+                val allyPow = maxOf(0, target.effectivePower)
+                if (allyPow > 0) {
+                    val unitIndices = s.playerHand.mapIndexedNotNull { i, hc ->
+                        if (hc.template.type == CardType.UNIT || hc.template.type == CardType.CHAMPION) i else null
+                    }
+                    if (unitIndices.isNotEmpty()) {
+                        val chosenIdx = unitIndices.random()
+                        val updatedHand = s.playerHand.toMutableList()
+                        val chosenCard = updatedHand[chosenIdx]
+                        updatedHand[chosenIdx] = chosenCard.copy(bonusPower = chosenCard.bonusPower + allyPow)
+                        s = s.copy(playerHand = updatedHand)
+                        logs.add("Kế Thừa ban +$allyPow|+0 cho ${chosenCard.template.name} trên tay!")
+                    }
+                }
+            }
+            // P1011: Cái Giá Của Sự Trả Thù - Gây 1 sát thương lên Nhà Chính địch
+            val p1011Count = s.activePowers.count { it.id == "P1011" }
+            if (p1011Count > 0) {
+                s = dealDamageToEnemyNexus(s, p1011Count, logs)
+                logs.add("Cái Giá Của Sự Trả Thù gây $p1011Count sát thương lên Nhà Chính địch!")
+            }
+            if (s.equippedRelics.any { it.id == "R0166" }) {
+                s = dealDamageToEnemyNexus(s, 1, logs)
+            }
+        }
+        // Relic: Voidborne Carapace (When any unit dies -> grant equipped champion its sharable keywords)
+        if (s.equippedRelics.any { it.id == "R0049" }) {
+            val sharable = target.keywords.filter { it.isSharablePositive }.toSet()
+            if (sharable.isNotEmpty()) {
+                s = s.copy(playerBoard = s.playerBoard.map { u ->
+                    if (u.template.isChampion) u.copy(keywords = u.keywords + sharable) else u
+                })
+            }
+        }
 
         s = syncChampionSpellsInHand(s)
         return cleanCombatUnitReferences(s, unitId)
@@ -3571,9 +4582,12 @@ object CombatEngine {
         return checkGameOver(s)
     }
 
-    private fun dealDamageToPlayerNexus(state: CombatState, dmg: Int, logs: MutableList<String>): CombatState {
+    internal fun dealDamageToPlayerNexus(state: CombatState, dmg: Int, logs: MutableList<String>): CombatState {
         if (dmg <= 0) return state
-        val s = state.copy(playerNexusHp = maxOf(0, state.playerNexusHp - dmg))
+        val hasNexusTough = state.equippedRelics.any { it.nexusTough } || state.activePowers.any { it.id == "P0549" }
+        val effectiveDmg = if (hasNexusTough) maxOf(0, dmg - 1) else dmg
+        if (effectiveDmg <= 0) return state
+        val s = state.copy(playerNexusHp = maxOf(0, state.playerNexusHp - effectiveDmg))
         return checkGameOver(s)
     }
 
@@ -3616,8 +4630,17 @@ object CombatEngine {
             val afterFatigue = dealDamageToEnemyNexus(state, EMPTY_DECK_FATIGUE_DAMAGE, logs)
             return afterFatigue.copy(combatLog = logs.takeLast(16))
         }
-        if (state.enemyHand.size >= 10) return state
-        return state.copy(enemyHand = state.enemyHand + state.enemyDrawPool.random())
+        val drawn = state.enemyDrawPool.random()
+        var s = state
+        val logs = s.combatLog.toMutableList()
+        if (s.enemyDeckTrapsCount > 0) {
+            s = triggerPlayerTrapOnEnemyDraw(s, drawn, logs)
+        }
+        return if (s.enemyHand.size >= 10) {
+            s.copy(combatLog = logs.takeLast(16))
+        } else {
+            s.copy(enemyHand = s.enemyHand + drawn, combatLog = logs.takeLast(16))
+        }
     }
 
     internal fun summonEnemyUnitFromPool(
@@ -4004,11 +5027,47 @@ object CombatEngine {
             s = s.copy(playerBoard = nextPlayer, enemyBoard = nextEnemy)
         }
 
+        // P0035: Giao Tranh Điên Cuồng - Cuối Vòng Đấu: Gây 2 sát thương lên toàn bộ đồng minh
+        val p0035Count = s.activePowers.count { it.id == "P0035" }
+        if (p0035Count > 0) {
+            val dmg = 2 * p0035Count
+            s.playerBoard.filter { it.template.type != CardType.LANDMARK }.map { it.instanceId }.forEach { uid ->
+                s = damageUnit(s, uid, isEnemy = false, damage = dmg, isSpell = false, fromAllyEffect = true, logs = logs)
+            }
+            logs.add("Giao Tranh Điên Cuồng gây $dmg sát thương lên toàn bộ đồng minh.")
+        }
+
+        // P0044: An Tử - Cuối Vòng Đấu: Tiêu diệt TẤT CẢ bài quân đang bị thương
+        if (s.activePowers.any { it.id == "P0044" }) {
+            val injuredPlayers = s.playerBoard.filter { it.template.type != CardType.LANDMARK && it.health < it.maxHealth }.map { it.instanceId }
+            val injuredEnemies = s.enemyBoard.filter { it.template.type != CardType.LANDMARK && it.health < it.maxHealth }.map { it.instanceId }
+            injuredPlayers.forEach { id -> s = removeUnit(s, id, isEnemy = false, logs = logs) }
+            injuredEnemies.forEach { id -> s = removeUnit(s, id, isEnemy = true, logs = logs) }
+            if (injuredPlayers.isNotEmpty() || injuredEnemies.isNotEmpty()) {
+                logs.add("An Tử tiêu diệt toàn bộ bài quân đang bị thương!")
+            }
+        }
+
+        // Enemy Karma Round End spell creation (interceptable by P0756)
+        if (s.enemyBoard.any { it.template.id == "card_karma" && !it.isSilenced }) {
+            val spellChoices = CardCatalog.cards.values.filter { it.type == CardType.SPELL && it.isCollectibleReward }
+            if (spellChoices.isNotEmpty()) {
+                s = addEnemyCreatedCardToHand(s, spellChoices.random(), logs)
+            }
+        }
+
+        // P0093: Không Thể Ngừng Lại - Các buff chỉ số & từ khóa "trong vòng này" của đồng minh (trừ Lá Chắn) tồn tại vĩnh viễn
+        val keepPlayerRoundBuffs = s.activePowers.any { it.id == "P0093" }
         val cleanPlayerBoard = s.playerBoard.map { u ->
             val healedHp = if (u.keywords.contains(Keyword.REGENERATION)) u.maxHealth else u.health
-            val supPow = (s.roundSupportPowerBuffs[u.instanceId] ?: 0) + (s.roundTempPowerBuffs[u.instanceId] ?: 0)
-            val supHp = (s.roundSupportHealthBuffs[u.instanceId] ?: 0) + (s.roundTempHealthBuffs[u.instanceId] ?: 0)
-            val supKws = (s.roundSupportKeywords[u.instanceId] ?: emptySet()) + (s.roundTempKeywords[u.instanceId] ?: emptySet())
+            val supPow = if (keepPlayerRoundBuffs) 0 else (s.roundSupportPowerBuffs[u.instanceId] ?: 0) + (s.roundTempPowerBuffs[u.instanceId] ?: 0)
+            val supHp = if (keepPlayerRoundBuffs) 0 else (s.roundSupportHealthBuffs[u.instanceId] ?: 0) + (s.roundTempHealthBuffs[u.instanceId] ?: 0)
+            val roundKwsForUnit = (s.roundSupportKeywords[u.instanceId] ?: emptySet()) + (s.roundTempKeywords[u.instanceId] ?: emptySet())
+            val supKws = if (keepPlayerRoundBuffs) {
+                roundKwsForUnit.filterTo(mutableSetOf()) { it == Keyword.BARRIER }
+            } else {
+                roundKwsForUnit
+            }
             val newMaxHp = maxOf(1, u.maxHealth - supHp)
             val newHp = minOf(newMaxHp, maxOf(1, healedHp - supHp))
             u.copy(
@@ -4047,7 +5106,7 @@ object CombatEngine {
             compareBy<UnitOnBoard> { it.effectivePower }.thenBy { it.health }.thenBy { it.template.cost }
         )
 
-        val cleanHand = s.playerHand.filterNot { it.isFleeting }
+        var cleanHand = s.playerHand.filterNot { s.effectiveIsFleeting(it) }
 
         val nextRound = s.round + 1
         val prevPlayerMax = s.playerMaxMana.coerceIn(1, 10)
@@ -4071,7 +5130,7 @@ object CombatEngine {
             enemyMana = newEnemyMax,
             enemyMaxMana = newEnemyMax,
             enemySpellMana = enemySpellBank,
-            playerHasAttackToken = playerGetsToken,
+            playerHasAttackToken = false,
             enemyHasAttackToken = !playerGetsToken,
             scoutUsedThisRound = false,
             pendingScoutRally = false,
@@ -4102,6 +5161,9 @@ object CombatEngine {
             playerCardsPlayedThisRound = 0,
             playerSpellsPlayedThisRound = 0,
             playerPlunderActive = false,
+            followersPlayedThisRound = 0,
+            renewingPowerUsedThisRound = false,
+            stoleEnemyCreatedCardThisRound = false,
             attackingUnitIds = emptyList(),
             blockPairings = emptyMap(),
             confirmedBlockedAttackerIds = emptySet(),
@@ -4117,6 +5179,53 @@ object CombatEngine {
             combatLog = logs.takeLast(16)
         )
 
+        // P0938: Bàn Cờ Pandora - Cuối Vòng Đấu: Biến đổi mỗi đồng minh thành 1 bài quân ngẫu nhiên có giá gốc cao hơn 2
+        if (s.activePowers.any { it.id == "P0938" }) {
+            val unitIdsToTransform = s.playerBoard.filter { it.template.type != CardType.LANDMARK }.map { it.instanceId }
+            if (unitIdsToTransform.isNotEmpty()) {
+                unitIdsToTransform.forEach { uid ->
+                    val u = s.playerBoard.find { it.instanceId == uid }
+                    if (u != null) {
+                        val targetTmpl = findRandomFollowerWithDelta(u.template.cost + 2)
+                        s = transformPlayerUnitToTemplate(s, uid, targetTmpl, logs)
+                    }
+                }
+                logs.add("Bàn Cờ Pandora biến đổi các đồng minh (+2 tiêu hao)!")
+            }
+        }
+
+        // P0102: Giảm Giá Chợ Đen - Cuối Vòng Đấu: Giảm 1 tiêu hao của lá bài đắt nhất trên tay bạn
+        repeat(s.activePowers.count { it.id == "P0102" }) {
+            if (s.playerHand.isNotEmpty()) {
+                val maxEntry = s.playerHand.withIndex().maxByOrNull { s.effectivePlayCost(it.value) }
+                if (maxEntry != null) {
+                    val updatedHand = s.playerHand.toMutableList()
+                    val card = maxEntry.value
+                    updatedHand[maxEntry.index] = card.copy(effectiveCost = maxOf(0, card.effectiveCost - 1))
+                    s = s.copy(playerHand = updatedHand)
+                    logs.add("Giảm Giá Chợ Đen giảm 1 tiêu hao cho ${card.template.name}.")
+                }
+            }
+        }
+
+        // P0916: Chiếc Hộp Trang Bị Pandora - Cuối Vòng Đấu: Gắn 1 trang bị Thường ngẫu nhiên cho 1 lá trên tay (tối đa 3)
+        repeat(s.activePowers.count { it.id == "P0916" }) {
+            val commonItems = CardCatalog.items.filter { it.rarity == Rarity.COMMON }
+            val eligibleIndices = s.playerHand.mapIndexedNotNull { idx, hc -> if (hc.attachedItems.size < 3) idx else null }
+            if (commonItems.isNotEmpty() && eligibleIndices.isNotEmpty()) {
+                val chosenIdx = eligibleIndices.random()
+                val updatedHand = s.playerHand.toMutableList()
+                val upgraded = attachItemToHandCard(updatedHand[chosenIdx], commonItems.random())
+                updatedHand[chosenIdx] = upgraded
+                s = s.copy(playerHand = updatedHand)
+                logs.add("Chiếc Hộp Trang Bị Pandora gắn trang bị Thường cho ${upgraded.template.name}!")
+            }
+        }
+
+        if (playerGetsToken) {
+            s = grantPlayerAttackToken(s, logs, "Đầu Vòng Đấu")
+        }
+
         s = drawPlayerCard(s)
         s = drawEnemyCard(s)
         s = applyRoundStartHooks(s, isGameStart = false)
@@ -4130,6 +5239,9 @@ object CombatEngine {
     ): CombatState {
         var s = state
         var rallyTriggered = false
+        var stunAllTriggered = false
+        var refillSpellManaTriggered = false
+        var refillManaBonus = 0
         val newlyLeveledIds = mutableListOf<String>()
         val updatedBoard = s.playerBoard.map { u ->
             if (u.template.isChampion && !u.isLeveledUp && !u.isSilenced) {
@@ -4140,25 +5252,87 @@ object CombatEngine {
                     "card_ashe" -> s.enemiesFrostbittenCount >= 3 || s.round >= 3
                     "card_garen" -> u.levelProgress >= 2
                     "card_anivia" -> isRoundStart && s.isEnlightened
+                    "card_renekton" -> u.levelProgress >= 2
+                    "card_azir" -> s.round >= 4
+                    "card_nasus" -> s.playerSlainCount >= 10
+                    "card_galio" -> s.playerBoard.filter { it.template.type != CardType.LANDMARK }.sumOf { it.health } >= 25
                     else -> s.round >= 3
                 }
                 if (shouldLevel) {
                     logs.add("★ ${u.template.name} ĐÃ THĂNG CẤP! (+${u.template.levelUpPowerBonus}|+${u.template.levelUpHealthBonus})")
                     newlyLeveledIds.add(u.template.id)
-                    if (s.equippedRelics.any { it.id == "relic_crownguard" }) rallyTriggered = true
+                    if (s.equippedRelics.any { it.levelUpRally }) rallyTriggered = true
+                    if (s.equippedRelics.any { it.id == "R0031" }) stunAllTriggered = true
+                    if (s.equippedRelics.any { it.id == "R0113" }) refillSpellManaTriggered = true
+                    if (s.equippedRelics.any { it.id == "R0105" }) refillManaBonus += 3
+                    val extraKws = if (u.template.id == "card_nasus") setOf(Keyword.SPELLSHIELD) else emptySet()
                     u.copy(
                         isLeveledUp = true,
                         power = u.power + u.template.levelUpPowerBonus,
                         health = u.health + u.template.levelUpHealthBonus,
-                        maxHealth = u.maxHealth + u.template.levelUpHealthBonus
+                        maxHealth = u.maxHealth + u.template.levelUpHealthBonus,
+                        keywords = u.keywords + extraKws,
+                        hasSpellShield = u.hasSpellShield || extraKws.contains(Keyword.SPELLSHIELD)
                     )
                 } else u
             } else u
         }
         s = s.copy(playerBoard = updatedBoard)
         if (rallyTriggered) {
-            s = s.copy(playerHasAttackToken = true)
-            logs.add("Di Sản Hoàng Tộc kích hoạt Tập Hợp!")
+            s = grantPlayerAttackToken(s, logs, "Crownguard Inheritance")
+            logs.add("Crownguard Inheritance kích hoạt Tập Hợp!")
+        }
+        if (stunAllTriggered) {
+            s.enemyBoard.toList().forEach { e ->
+                s = stunEnemyUnit(s, e.instanceId, logs)
+            }
+            logs.add("Tempest Blade làm Choáng toàn bộ kẻ địch!")
+        }
+        if (refillSpellManaTriggered) {
+            s = s.copy(playerSpellMana = 3)
+        }
+        if (refillManaBonus > 0) {
+            s = s.copy(playerMana = minOf(s.playerMaxMana, s.playerMana + refillManaBonus))
+        }
+        if (newlyLeveledIds.isNotEmpty() && s.equippedRelics.any { it.id == "R0130" } && s.playerBoard.size < 6) {
+            val summonId = when {
+                s.playerBoard.none { it.template.id == "card_lux" } -> "card_lux"
+                s.playerBoard.none { it.template.id == "card_garen" } -> "card_garen"
+                else -> null
+            }
+            if (summonId != null) {
+                s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard(summonId)), logs)
+                logs.add("Protectors of Demacia triệu hồi ${CardCatalog.getCard(summonId).name}!")
+            }
+        }
+        // P0671: Những Người Bảo Hộ Demacia - Khi Thăng Cấp 1 Tướng, triệu hồi Lux -> Garen -> Galio
+        if (newlyLeveledIds.isNotEmpty() && s.activePowers.any { it.id == "P0671" } && s.playerBoard.size < 6) {
+            val summonId = when {
+                s.playerBoard.none { it.template.id == "card_lux" } -> "card_lux"
+                s.playerBoard.none { it.template.id == "card_garen" } -> "card_garen"
+                s.playerBoard.none { it.template.id == "card_galio" } -> "card_galio"
+                else -> null
+            }
+            if (summonId != null) {
+                s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard(summonId)), logs)
+                logs.add("Những Người Bảo Hộ Demacia triệu hồi ${CardCatalog.getCard(summonId).name}!")
+            }
+        }
+        // Đĩa Mặt Trời Chôn Vùi: Khi Tướng Shurima Thăng Cấp, đẩy nhanh 10 vòng
+        val hasShurimaLevelUp = newlyLeveledIds.any { CardCatalog.getCard(it).region == Region.SHURIMA }
+        if (hasShurimaLevelUp) {
+            val sunDiscs = s.playerBoard.filter { it.template.id == "card_buried_sun_disc" && it.countdownRemaining > 0 }
+            sunDiscs.forEach { disc ->
+                val rem = disc.countdownRemaining - 10
+                if (rem <= 0) {
+                    s = s.copy(playerBoard = s.playerBoard.filterNot { it.instanceId == disc.instanceId })
+                    s = completeCountdownLandmark(s, disc, logs)
+                } else {
+                    s = s.copy(playerBoard = s.playerBoard.map {
+                        if (it.instanceId == disc.instanceId) it.copy(countdownRemaining = rem) else it
+                    })
+                }
+            }
         }
         for (champId in newlyLeveledIds) {
             when (champId) {
@@ -4354,32 +5528,55 @@ object CombatEngine {
             val rightId = orderedAttackerIds[i + 1]
             val supported = board.find { it.instanceId == rightId } ?: continue
 
+            val hasShadeleaf = playerIsAttacking && supporter.template.isChampion && s.equippedRelics.any { it.id == "R0041" }
+            val hasCorruptedStar = playerIsAttacking && supporter.template.isChampion && s.equippedRelics.any { it.id == "R0045" }
+
             val grantPow = supporter.supportPowerBonus
             val grantHp = supporter.supportHealthBonus
-            val grantKw = supporter.supportKeyword
-            if (grantPow == 0 && grantHp == 0 && grantKw == null) continue
-
-            val updatedBoard = board.map { u ->
-                if (u.instanceId == rightId) {
-                    val hadKwAlready = grantKw != null && u.keywords.contains(grantKw)
-                    if (grantKw != null && !hadKwAlready) {
-                        roundKw[rightId] = (roundKw[rightId] ?: emptySet()) + grantKw
-                    }
-                    if (grantPow != 0) roundPow[rightId] = (roundPow[rightId] ?: 0) + grantPow
-                    if (grantHp != 0) roundHp[rightId] = (roundHp[rightId] ?: 0) + grantHp
-                    u.copy(
-                        power = u.power + grantPow,
-                        health = u.health + grantHp,
-                        maxHealth = u.maxHealth + grantHp,
-                        keywords = if (grantKw != null) u.keywords + grantKw else u.keywords,
-                        hasBarrier = u.hasBarrier || grantKw == Keyword.BARRIER,
-                        hasSpellShield = u.hasSpellShield || grantKw == Keyword.SPELLSHIELD,
-                        hasDeathless = u.hasDeathless || grantKw == Keyword.DEATHLESS
-                    )
-                } else u
+            val grantKw = supporter.supportKeyword ?: if (hasShadeleaf) Keyword.ELUSIVE else null
+            if (grantPow != 0 || grantHp != 0 || grantKw != null) {
+                val updatedBoard = board.map { u ->
+                    if (u.instanceId == rightId) {
+                        val hadKwAlready = grantKw != null && u.keywords.contains(grantKw)
+                        if (grantKw != null && !hadKwAlready) {
+                            roundKw[rightId] = (roundKw[rightId] ?: emptySet()) + grantKw
+                        }
+                        if (grantPow != 0) roundPow[rightId] = (roundPow[rightId] ?: 0) + grantPow
+                        if (grantHp != 0) roundHp[rightId] = (roundHp[rightId] ?: 0) + grantHp
+                        u.copy(
+                            power = u.power + grantPow,
+                            health = u.health + grantHp,
+                            maxHealth = u.maxHealth + grantHp,
+                            keywords = if (grantKw != null) u.keywords + grantKw else u.keywords,
+                            hasBarrier = u.hasBarrier || grantKw == Keyword.BARRIER,
+                            hasSpellShield = u.hasSpellShield || grantKw == Keyword.SPELLSHIELD,
+                            hasDeathless = u.hasDeathless || grantKw == Keyword.DEATHLESS
+                        )
+                    } else u
+                }
+                s = if (playerIsAttacking) s.copy(playerBoard = updatedBoard) else s.copy(enemyBoard = updatedBoard)
+                logs.add("${supporter.template.name} Hỗ Trợ ${supported.template.name} (+$grantPow|+$grantHp${grantKw?.let { ", ${it.displayName}" } ?: ""})!")
             }
-            s = if (playerIsAttacking) s.copy(playerBoard = updatedBoard) else s.copy(enemyBoard = updatedBoard)
-            logs.add("${supporter.template.name} Hỗ Trợ ${supported.template.name} (+$grantPow|+$grantHp${grantKw?.let { ", ${it.displayName}" } ?: ""})!")
+
+            if (hasCorruptedStar) {
+                val liveSup = s.playerBoard.find { it.instanceId == supporter.instanceId }
+                val liveTarget = s.playerBoard.find { it.instanceId == rightId }
+                if (liveSup != null && liveTarget != null) {
+                    val absorbedKws = liveTarget.keywords.filter { it.isSharablePositive }.toSet()
+                    s = s.copy(playerBoard = s.playerBoard.map { u ->
+                        if (u.instanceId == liveSup.instanceId) {
+                            u.copy(
+                                power = u.power + liveTarget.effectivePower,
+                                health = u.health + liveTarget.health,
+                                maxHealth = u.maxHealth + liveTarget.maxHealth,
+                                keywords = u.keywords + absorbedKws
+                            )
+                        } else u
+                    })
+                    s = removeUnit(s, liveTarget.instanceId, isEnemy = false, logs = logs)
+                    logs.add("Corrupted Star Fragment hấp thụ ${liveTarget.template.name}!")
+                }
+            }
         }
         s = s.copy(
             roundSupportPowerBuffs = roundPow,
@@ -4488,10 +5685,19 @@ object CombatEngine {
         s = applyAttackSupportBuffs(s, validIds, playerIsAttacking = playerIsAttacking, logs = logs)
 
         validAttackers.forEach { atk ->
-            if (playerIsAttacking && atk.template.isChampion && s.equippedRelics.any { it.id == "relic_guinsoos_rageblade" }) {
+            if (playerIsAttacking && atk.template.isChampion && s.equippedRelics.any { it.attackGainPlusOnePlusOne }) {
                 s = s.copy(playerBoard = s.playerBoard.map {
                     if (it.instanceId == atk.instanceId) it.copy(power = it.power + 1, health = it.health + 1, maxHealth = it.maxHealth + 1) else it
                 })
+            }
+            if (playerIsAttacking && atk.template.isChampion && s.equippedRelics.any { it.id == "R0160" }) {
+                s = dealDamageToEnemyNexus(s, 1, logs)
+                s.enemyBoard.toList().forEach { e ->
+                    s = damageUnit(s, e.instanceId, isEnemy = true, damage = 1, isSpell = false, logs = logs)
+                }
+            }
+            if (playerIsAttacking && atk.template.isChampion && s.equippedRelics.any { it.id == "R0120" }) {
+                s = dealDamageToEnemyNexus(s, 2, logs)
             }
             if (playerIsAttacking && atk.template.id == "card_ashe" && !atk.isSilenced) {
                 val target = s.enemyBoard.filter { !it.isFrostbitten }.maxByOrNull { it.effectivePower }
@@ -4526,6 +5732,11 @@ object CombatEngine {
                     logs.add("Kỹ năng ${skillCard.name} của Anivia vào hàng chờ!")
                 }
             }
+        }
+
+        val sandSoldierAtkCount = validAttackers.count { it.template.id == "card_sand_soldier" && !it.isSilenced }
+        if (playerIsAttacking && sandSoldierAtkCount > 0) {
+            s = dealDamageToEnemyNexus(s, sandSoldierAtkCount, logs)
         }
 
         val currentBoard = if (playerIsAttacking) s.playerBoard else s.enemyBoard
@@ -4598,4 +5809,302 @@ object CombatEngine {
     }
 
     internal fun generateId(): String = nextId()
+
+    // --- 55 EPIC POWER HELPERS ---
+
+    internal fun attachItemToHandCard(card: HandCardInstance, item: ItemTemplate): HandCardInstance {
+        val updatedItems = card.attachedItems + item
+        val newKeywords = item.grantedKeyword?.let { card.extraKeywords + it } ?: card.extraKeywords
+        return card.copy(
+            attachedItems = updatedItems,
+            effectiveCost = maxOf(0, card.effectiveCost - item.costReduction),
+            bonusPower = card.bonusPower + item.bonusPower,
+            bonusHealth = card.bonusHealth + item.bonusHealth,
+            extraKeywords = newKeywords
+        )
+    }
+
+    internal fun grantPlayerAttackToken(
+        state: CombatState,
+        logs: MutableList<String>,
+        reason: String? = null
+    ): CombatState {
+        val gainedNewToken = !state.playerHasAttackToken
+        var s = state.copy(playerHasAttackToken = true)
+        if (gainedNewToken) {
+            repeat(s.activePowers.count { it.id == "P0119" }) {
+                if (s.playerBoard.size < 6) {
+                    s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_sapling")), logs)
+                    logs.add("Sự Báo Thù Của Thiên Nhiên triệu hồi 1 Chồi Non (2|1)!")
+                }
+            }
+        }
+        return s
+    }
+
+    internal fun completeCountdownLandmark(
+        state: CombatState,
+        landmark: UnitOnBoard,
+        logs: MutableList<String>
+    ): CombatState {
+        var s = state
+        when (landmark.template.id) {
+            "card_buried_sun_disc" -> {
+                s = s.copy(playerBoard = s.playerBoard.map { u ->
+                    if (u.template.isChampion && u.template.region == Region.SHURIMA && !u.isSilenced) {
+                        if (!u.isLeveledUp) {
+                            u.copy(
+                                isLeveledUp = true,
+                                power = u.power + u.template.levelUpPowerBonus,
+                                health = u.health + u.template.levelUpHealthBonus,
+                                maxHealth = u.maxHealth + u.template.levelUpHealthBonus
+                            )
+                        } else {
+                            u.copy(power = u.power + 1, health = u.health + 1, maxHealth = u.maxHealth + 1)
+                        }
+                    } else u
+                })
+                logs.add("Đĩa Mặt Trời Chôn Vùi khôi phục! Thăng Cấp các Tướng Shurima!")
+            }
+            "card_hibernating_rockbear" -> {
+                if (s.playerBoard.size < 6) {
+                    s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard("card_grumpy_rockbear")), logs)
+                }
+                logs.add("Gấu Đá Ngủ Đông thức giấc thành Gấu Đá Khổng Lồ (5|4)!")
+            }
+            "card_ancient_preparations" -> {
+                s = drawPlayerCard(s)
+                logs.add("Chuẩn Bị Cổ Xưa hoàn tất Đếm Ngược: Rút 1 lá!")
+            }
+            else -> {
+                s = s.copy(playerSpellMana = minOf(3, s.playerSpellMana + 2))
+                repeat(2) { s = drawPlayerCard(s) }
+                logs.add("${landmark.template.name} hoàn tất Đếm Ngược: Rút 2 lá & +2 Năng Lượng Phép!")
+            }
+        }
+        return s
+    }
+
+    internal fun addEnemyCreatedCardToHand(
+        state: CombatState,
+        card: CardTemplate,
+        logs: MutableList<String>
+    ): CombatState {
+        if (!state.stoleEnemyCreatedCardThisRound && state.activePowers.any { it.id == "P0756" }) {
+            val stolenHand = if (state.playerHand.size < 10) {
+                state.playerHand + createHandInstance(card, isFleeting = true, isCreated = true).copy(effectiveCost = 0)
+            } else state.playerHand
+            logs.add("Cấm Gian Lận: Đánh cắp ${card.name} của đối thủ với giá 0 tiêu hao và Phù Du!")
+            return state.copy(
+                playerHand = stolenHand,
+                stoleEnemyCreatedCardThisRound = true
+            )
+        }
+        return if (state.enemyHand.size < 10) {
+            state.copy(enemyHand = state.enemyHand + card)
+        } else state
+    }
+
+    internal fun triggerPlayerTrapOnEnemyDraw(
+        state: CombatState,
+        drawnCard: CardTemplate,
+        logs: MutableList<String>
+    ): CombatState {
+        var s = state
+        if (s.enemyDeckTrapsCount <= 0) return s
+        val trapsTriggered = minOf(s.enemyDeckTrapsCount, Random.nextInt(1, 3))
+        s = s.copy(enemyDeckTrapsCount = maxOf(0, s.enemyDeckTrapsCount - trapsTriggered))
+        s = dealDamageToEnemyNexus(s, trapsTriggered, logs)
+        logs.add("Bẫy Nấm Độc kích hoạt trên ${drawnCard.name} của địch gây $trapsTriggered sát thương!")
+
+        if (s.activePowers.any { it.id == "P0642" } && s.playerHand.size < 10) {
+            val reducedCost = maxOf(0, drawnCard.cost - 2 * trapsTriggered)
+            val stolenCopy = createHandInstance(drawnCard, isFleeting = true, isCreated = true).copy(
+                effectiveCost = reducedCost
+            )
+            s = s.copy(playerHand = s.playerHand + stolenCopy)
+            logs.add("Ta Lấy Cả Cái Đó: Tạo bản sao ${drawnCard.name} ($reducedCost NL, Phù Du) lên tay!")
+        }
+        return s
+    }
+
+    internal fun triggerDarkinStrikePower(
+        state: CombatState,
+        darkinUnitId: String,
+        logs: MutableList<String>
+    ): CombatState {
+        var s = state
+        val repeatCount = s.activePowers.count { it.id == "P0897" }
+        repeat(repeatCount) {
+            val weakest = s.enemyBoard
+                .filter { it.template.type != CardType.LANDMARK }
+                .minWithOrNull(compareBy<UnitOnBoard> { it.health }.thenBy { it.effectivePower })
+            val darkinUnit = s.playerBoard.find { it.instanceId == darkinUnitId }
+            if (darkinUnit != null && weakest != null) {
+                s = performNonCombatStrike(
+                    state = s,
+                    strikerId = darkinUnit.instanceId,
+                    strikerIsPlayer = true,
+                    targetId = weakest.instanceId,
+                    targetIsEnemy = true,
+                    logs = logs
+                )
+                logs.add("Thanh Kiếm Darkin: ${darkinUnit.template.name} ra đòn vào ${weakest.template.name}!")
+            }
+        }
+        return s
+    }
+
+    private fun isAllyOnlySpell(state: CombatState, card: CardTemplate): Boolean {
+        val (enemies, allies) = getValidSpellTargetIds(state, card)
+        return (enemies.isEmpty() && allies.isNotEmpty()) ||
+            card.effectType == CardEffectType.STANCE_SWAP_EFFECT ||
+            card.effectType == CardEffectType.GIVE_BARRIER_AND_DRAW ||
+            card.effectType == CardEffectType.RALLY_AND_SHIELD ||
+            card.effectType == CardEffectType.FREE_ATTACK ||
+            card.effectType == CardEffectType.BREAKOUT_EFFECT ||
+            card.effectType == CardEffectType.ASTRAL_DIFFUSION_EFFECT ||
+            card.effectType == CardEffectType.BUFF_ALLIES_STATS ||
+            card.effectType == CardEffectType.BUFF_ALLY_STATS
+    }
+
+    internal fun levelUpSpecificChampion(
+        state: CombatState,
+        unitInstanceId: String,
+        logs: MutableList<String>
+    ): CombatState {
+        val target = state.playerBoard.find { it.instanceId == unitInstanceId } ?: return state
+        if (!target.template.isChampion || target.isLeveledUp || target.isSilenced) return state
+        var s = state
+        val extraKws = if (target.template.id == "card_nasus") setOf(Keyword.SPELLSHIELD) else emptySet()
+        s = s.copy(playerBoard = s.playerBoard.map { u ->
+            if (u.instanceId == unitInstanceId) {
+                u.copy(
+                    isLeveledUp = true,
+                    power = u.power + u.template.levelUpPowerBonus,
+                    health = u.health + u.template.levelUpHealthBonus,
+                    maxHealth = u.maxHealth + u.template.levelUpHealthBonus,
+                    keywords = u.keywords + extraKws,
+                    hasSpellShield = u.hasSpellShield || extraKws.contains(Keyword.SPELLSHIELD)
+                )
+            } else u
+        })
+        logs.add("★ Ánh Hào Quang Tinh Tú thăng cấp ${target.template.name}!")
+        if (s.equippedRelics.any { it.levelUpRally }) {
+            s = grantPlayerAttackToken(s, logs, "Crownguard Inheritance")
+        }
+        if (s.equippedRelics.any { it.id == "R0031" }) {
+            s.enemyBoard.toList().forEach { e -> s = stunEnemyUnit(s, e.instanceId, logs) }
+        }
+        if (s.equippedRelics.any { it.id == "R0113" }) {
+            s = s.copy(playerSpellMana = 3)
+        }
+        if (s.equippedRelics.any { it.id == "R0105" }) {
+            s = s.copy(playerMana = minOf(s.playerMaxMana, s.playerMana + 3))
+        }
+        if (s.activePowers.any { it.id == "P0671" } && s.playerBoard.size < 6) {
+            val summonId = when {
+                s.playerBoard.none { it.template.id == "card_lux" } -> "card_lux"
+                s.playerBoard.none { it.template.id == "card_garen" } -> "card_garen"
+                s.playerBoard.none { it.template.id == "card_galio" } -> "card_galio"
+                else -> null
+            }
+            if (summonId != null) {
+                s = summonPlayerUnit(s, createHandInstance(CardCatalog.getCard(summonId)), logs)
+            }
+        }
+        if (target.template.region == Region.SHURIMA) {
+            s.playerBoard.filter { it.template.id == "card_buried_sun_disc" && it.countdownRemaining > 0 }.forEach { disc ->
+                val rem = disc.countdownRemaining - 10
+                if (rem <= 0) {
+                    s = s.copy(playerBoard = s.playerBoard.filterNot { it.instanceId == disc.instanceId })
+                    s = completeCountdownLandmark(s, disc, logs)
+                } else {
+                    s = s.copy(playerBoard = s.playerBoard.map {
+                        if (it.instanceId == disc.instanceId) it.copy(countdownRemaining = rem) else it
+                    })
+                }
+            }
+        }
+        return s
+    }
+
+    internal fun pickThreeFollowerTransformOptions(targetCost: Int): List<String> {
+        val allFollowers = CardCatalog.cards.values.filter { it.type == CardType.UNIT }
+        val exact = allFollowers.filter { it.cost == targetCost }.shuffled()
+        val chosen = exact.take(3).toMutableList()
+        if (chosen.size < 3) {
+            val fallback = allFollowers
+                .filterNot { candidate -> chosen.any { it.id == candidate.id } }
+                .sortedBy { kotlin.math.abs(it.cost - targetCost) }
+            for (c in fallback) {
+                if (chosen.size >= 3) break
+                chosen.add(c)
+            }
+        }
+        return chosen.map { it.id }
+    }
+
+    internal fun findRandomFollowerWithDelta(targetCost: Int): CardTemplate {
+        val followers = CardCatalog.cards.values.filter { it.type == CardType.UNIT }
+        val exact = followers.filter { it.cost == targetCost }
+        if (exact.isNotEmpty()) return exact.random()
+        val minDiff = followers.minOfOrNull { kotlin.math.abs(it.cost - targetCost) } ?: 0
+        return followers.filter { kotlin.math.abs(it.cost - targetCost) == minDiff }.random()
+    }
+
+    internal fun transformPlayerUnitToTemplate(
+        state: CombatState,
+        unitInstanceId: String,
+        newTemplate: CardTemplate,
+        logs: MutableList<String>
+    ): CombatState {
+        var s = state
+        val existing = s.playerBoard.find { it.instanceId == unitInstanceId } ?: return s
+        val oldTmpl = existing.template
+        val deltaPow = newTemplate.basePower - oldTmpl.basePower
+        val deltaHp = newTemplate.baseHealth - oldTmpl.baseHealth
+        val newMaxHp = maxOf(1, existing.maxHealth + deltaHp)
+        val newHp = maxOf(1, minOf(newMaxHp, existing.health + deltaHp))
+        val newKeywords = (existing.keywords - oldTmpl.keywords) + newTemplate.keywords
+        s = s.copy(
+            playerBoard = s.playerBoard.map { u ->
+                if (u.instanceId == unitInstanceId) {
+                    u.copy(
+                        template = newTemplate,
+                        power = maxOf(0, existing.power + deltaPow),
+                        health = newHp,
+                        maxHealth = newMaxHp,
+                        keywords = newKeywords,
+                        hasBarrier = u.hasBarrier || newTemplate.keywords.contains(Keyword.BARRIER),
+                        hasSpellShield = u.hasSpellShield || newTemplate.keywords.contains(Keyword.SPELLSHIELD),
+                        hasDeathless = u.hasDeathless || newTemplate.keywords.contains(Keyword.DEATHLESS),
+                        isLeveledUp = false
+                    )
+                } else u
+            }
+        )
+        s = refreshEvolveAndSeenKeywords(s, logs)
+        if (newTemplate.isDarkin && s.activePowers.any { it.id == "P0897" }) {
+            s = triggerDarkinStrikePower(s, unitInstanceId, logs)
+        }
+        return s
+    }
+
+    fun resolveFollowerTransformChoice(state: CombatState, chosenCardId: String): CombatState {
+        val pending = state.pendingTransformChoice ?: return state
+        if (!pending.optionCardIds.contains(chosenCardId)) return state
+        val newTemplate = CardCatalog.findCardOrNull(chosenCardId) ?: return state
+        val logs = state.combatLog.toMutableList()
+        var s = transformPlayerUnitToTemplate(state, pending.targetUnitInstanceId, newTemplate, logs)
+        logs.add("Dòng Thời Gian Hội Tụ biến đổi thành ${newTemplate.name} (${newTemplate.basePower}|${newTemplate.baseHealth})!")
+        s = s.copy(
+            pendingTransformChoice = null,
+            priorityHolder = PriorityHolder.ENEMY,
+            consecutivePasses = 0,
+            combatLog = logs.takeLast(16)
+        )
+        s = syncChampionSpellsInHand(s)
+        return checkGameOver(s)
+    }
 }

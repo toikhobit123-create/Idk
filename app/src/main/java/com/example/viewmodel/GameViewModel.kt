@@ -464,7 +464,7 @@ class GameViewModel(
             maxNexusHp = loadout.maxNexusHp,
             gold = loadout.startingGold,
             rerollsRemaining = loadout.startingRerolls,
-            revivesRemaining = 1,
+            revivesRemaining = loadout.startingRevives,
             activePowerIds = emptyList(),
             runDeck = initialDeck,
             battlesWon = 0
@@ -515,7 +515,7 @@ class GameViewModel(
             maxNexusHp = loadout.maxNexusHp,
             gold = loadout.startingGold,
             rerollsRemaining = loadout.startingRerolls,
-            revivesRemaining = 1,
+            revivesRemaining = loadout.startingRevives,
             activePowerIds = emptyList(),
             runDeck = initialDeck,
             battlesWon = 0
@@ -1097,6 +1097,12 @@ class GameViewModel(
         }
     }
 
+    fun chooseFollowerTransform(cardId: String) {
+        updatePlayerCombatState(scheduleAiOnChange = true) { current ->
+            CombatEngine.resolveFollowerTransformChoice(current, cardId)
+        }
+    }
+
     fun enterAttack() {
         updatePlayerCombatState { current ->
             CombatEngine.enterAttackDeclaration(current)
@@ -1234,9 +1240,14 @@ class GameViewModel(
         val champLevel = loadout?.championLevel ?: 1
         val victoryHeal = loadout?.victoryHeal ?: 2
         val healedHp = maxOf(1, minOf(run.maxNexusHp, combat.playerNexusHp + victoryHeal))
+        val goldMultiplier = 1.0 + (loadout?.equippedRelics
+            ?.mapNotNull { it?.let { id -> CardCatalog.findRelicOrNull(id) } }
+            ?.sumOf { it.goldMultiplierBonus } ?: 0.0)
+        val extraGoldFromPowers = 200 * combat.activePowers.count { it.id == "P0073" }
+        val goldGained = (node.goldReward * goldMultiplier).toInt() + extraGoldFromPowers
         val updatedRun = run.copy(
             currentNexusHp = healedHp,
-            gold = run.gold + node.goldReward,
+            gold = run.gold + goldGained,
             battlesWon = run.battlesWon + 1,
             currentNodeId = node.id,
             completedNodeIds = (run.completedNodeIds + node.id).distinct()
@@ -1253,7 +1264,7 @@ class GameViewModel(
                     pendingPostCombatNode = node,
                     cardDraftOptions = rollCardOffers(3, champLevel),
                     screen = AppScreen.CardDraft,
-                    bannerMessage = "Chiến thắng! +${node.goldReward} Vàng • +$victoryHeal Máu. Chọn 1 lá bài."
+                    bannerMessage = "Chiến thắng! +${goldGained} Vàng • +$victoryHeal Máu. Chọn 1 lá bài."
                 )
             }
         }

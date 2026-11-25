@@ -369,7 +369,8 @@ fun HandCardInspectOverlay(
     descFontSize: TextUnit,
     onPlay: () -> Unit,
     onDismiss: () -> Unit,
-    manaPreview: ManaPaymentPreview? = null
+    manaPreview: ManaPaymentPreview? = null,
+    isFleeting: Boolean = card.isFleeting
 ) {
     val resolvedCanPlay = canPlay && (manaPreview?.canPlay ?: true)
     Box(
@@ -413,7 +414,7 @@ fun HandCardInspectOverlay(
                         bonusHealth = card.bonusHealth,
                         attachedItems = card.attachedItems,
                         extraKeywords = card.extraKeywords,
-                        isFleeting = card.isFleeting,
+                        isFleeting = isFleeting,
                         playable = resolvedCanPlay
                     )
                     if (manaPreview != null) {
@@ -1243,4 +1244,59 @@ fun ChampionLevelUpBannerOverlay(
             }
         }
     }
+}
+
+@Composable
+fun FollowerTransformChoiceDialog(
+    optionCardIds: List<String>,
+    onChoose: (String) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        modifier = Modifier.testTag("follower_transform_dialog"),
+        containerColor = SurfaceOverlay,
+        titleContentColor = AccentGold,
+        title = {
+            Text(
+                text = "Sức Mạnh Vô Tận",
+                fontFamily = CinzelFontFamily,
+                fontWeight = FontWeight.Bold,
+                color = AccentGold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(GameSpacing.sm)
+            ) {
+                Text(
+                    text = "Chọn 1 Tùy Tùng để biến hình và nhận +1|+1:",
+                    fontFamily = PlusJakartaSansFamily,
+                    fontSize = 13.sp,
+                    color = TextPrimary
+                )
+                optionCardIds.forEach { cardId ->
+                    val template = com.example.model.CardCatalog.getCard(cardId)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(GameRadius.card))
+                            .clickable { onChoose(cardId) }
+                            .testTag("transform_choice_$cardId")
+                    ) {
+                        CardTile(
+                            template = template,
+                            effectiveCost = template.cost,
+                            bonusPower = 1,
+                            bonusHealth = 1,
+                            playable = true
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {}
+    )
 }

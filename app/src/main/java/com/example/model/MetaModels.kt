@@ -70,6 +70,9 @@ data class ChampionLoadout(
     val unlockedRelicSlots: Int = 1,
     val cosmicForgedSlots: Int = 0
 ) {
+    private val resolvedRelics
+        get() = equippedRelics.mapNotNull { it?.let { id -> CardCatalog.findRelicOrNull(id) } }
+
     val maxNexusHp: Int
         get() {
             val champ = CardCatalog.findChampionOrNull(championId)
@@ -78,14 +81,18 @@ data class ChampionLoadout(
             val nodeHpBonus = champ?.constellationNodes
                 ?.filter { unlockedConstellationNodes.contains(it.id) }
                 ?.sumOf { it.bonusMaxHp } ?: 0
-            return baseHp + levelHpBonus + nodeHpBonus
+            val relicHpBonus = resolvedRelics.sumOf { it.adventureMaxHpBonus }
+            return baseHp + levelHpBonus + nodeHpBonus + relicHpBonus
         }
 
     val victoryHeal: Int
-        get() = when {
-            championLevel >= 24 -> 4
-            championLevel >= 12 -> 3
-            else -> 2
+        get() {
+            val baseHeal = when {
+                championLevel >= 24 -> 4
+                championLevel >= 12 -> 3
+                else -> 2
+            }
+            return baseHeal + resolvedRelics.sumOf { it.adventureRegenBonus }
         }
 
     val startingGold: Int
@@ -95,7 +102,8 @@ data class ChampionLoadout(
             val nodeGold = champ?.constellationNodes
                 ?.filter { unlockedConstellationNodes.contains(it.id) }
                 ?.sumOf { it.bonusStartingGold } ?: 0
-            return levelGold + nodeGold
+            val relicGold = resolvedRelics.sumOf { it.adventureStartingGoldBonus }
+            return levelGold + nodeGold + relicGold
         }
 
     val startingRerolls: Int
@@ -105,8 +113,12 @@ data class ChampionLoadout(
             val nodeRerolls = champ?.constellationNodes
                 ?.filter { unlockedConstellationNodes.contains(it.id) }
                 ?.sumOf { it.bonusRerolls } ?: 0
-            return levelRerolls + nodeRerolls
+            val relicRerolls = resolvedRelics.sumOf { it.adventureStartingRerollsBonus }
+            return levelRerolls + nodeRerolls + relicRerolls
         }
+
+    val startingRevives: Int
+        get() = 1 + resolvedRelics.sumOf { it.adventureStartingRevivesBonus }
 
     val startingManaBonus: Int
         get() = (if (starLevel >= 2) 1 else 0) + (if (starLevel >= 5) 1 else 0)
@@ -192,7 +204,7 @@ data class LegendProfile(
     val starCrystals: Int = 10,
     val novaCrystals: Int = 1,
     val gemstones: Int = 25,
-    val ownedRelicIds: List<String> = listOf("relic_stalkers_blade", "relic_archangels_staff", "relic_ludens_tempest", "relic_guinsoos_rageblade"),
+    val ownedRelicIds: List<String> = listOf("R0040", "R0013", "R0017", "R0024"),
     val completedAdventureIds: List<String> = emptyList(),
     val totalRunsWon: Int = 0
 ) {

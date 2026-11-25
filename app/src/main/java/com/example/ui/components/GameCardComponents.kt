@@ -642,6 +642,15 @@ fun cardPortraitRes(cardId: String): Int? = when (cardId) {
     "card_camavoran_dragon" -> R.drawable.img_camavoran_dragon
     "card_possession" -> R.drawable.img_possession
     "card_invasive_hydravine" -> R.drawable.img_invasive_hydravine
+    "card_taarosh", "card_forged_blade" -> R.drawable.img_laurent_bladekeeper
+    "card_hextech_observatory", "card_hex_core_upgrade", "card_animated_spell" -> R.drawable.img_champ_lux
+    "card_buried_sun_disc", "card_ancient_preparations", "card_azir", "card_sand_soldier",
+    "card_renekton", "card_nasus" -> R.drawable.img_dawnspeakers
+    "card_hibernating_rockbear", "card_grumpy_rockbear", "card_scarmother_vrynna" -> R.drawable.img_badgerbear
+    "card_galio", "card_cythria_the_bold" -> R.drawable.img_tiana_crownguard
+    "card_sapling", "card_windfarer_hatchling" -> R.drawable.img_fleetfeather_tracker
+    "card_caustic_cask", "card_breakout", "card_astral_diffusion", "card_stance_swap" -> R.drawable.img_black_spear
+    "card_lonely_poro", "card_nimble_poro" -> R.drawable.img_tough_poro
     else -> null
 }
 
@@ -674,6 +683,7 @@ fun HandCardView(
     isShowcasePreview: Boolean = false,
     enablePressElevation: Boolean = true,
     showDetails: Boolean = true,
+    isFleeting: Boolean = handCard.isFleeting,
     testTag: String? = null,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
@@ -973,7 +983,7 @@ fun HandCardView(
                 )
             }
 
-            if (handCard.isFleeting) {
+            if (isFleeting) {
                 KeywordIcon(
                     keyword = Keyword.FLEETING,
                     size = cardWidth * 0.16f,

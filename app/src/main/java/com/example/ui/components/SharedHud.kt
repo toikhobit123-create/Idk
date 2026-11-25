@@ -108,6 +108,7 @@ fun regionAccentColor(region: Region): Color = when (region) {
     Region.SHADOW_ISLES -> SemanticHeal
     Region.TARGON -> AccentSpellMana
     Region.NOXUS -> SemanticDanger
+    Region.SHURIMA -> AccentGold
     Region.RUNETERRA -> SemanticAttack
 }
 
@@ -392,7 +393,7 @@ fun RelicSlotCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val relic = relicId?.let { CardCatalog.getRelic(it) }
+    val relic = relicId?.let { CardCatalog.findRelicOrNull(it) }
     val borderColor = when {
         !unlocked -> BorderSubtle
         isCosmicForged -> AccentSpellMana.copy(alpha = 0.7f)

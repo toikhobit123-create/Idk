@@ -39,14 +39,19 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,6 +81,7 @@ import com.example.model.DeckCardEntry
 import com.example.model.HandCardInstance
 import com.example.model.ItemCategory
 import com.example.model.ItemTemplate
+import com.example.model.Rarity
 import com.example.ui.components.ChampionAvatarBadge
 import com.example.ui.components.HandCardView
 import com.example.ui.components.LorBrassButton
@@ -408,52 +414,122 @@ fun ChampionDetailScreen(
     }
 
     relicPickerSlot?.let { slot ->
+        var searchQuery by remember(slot) { mutableStateOf("") }
+        var selectedRarity by remember(slot) { mutableStateOf<Rarity?>(null) }
+        val filteredRelics = remember(searchQuery, selectedRarity) {
+            val q = searchQuery.trim()
+            CardCatalog.relics.filter { relic ->
+                (selectedRarity == null || relic.rarity == selectedRarity) &&
+                    (q.isEmpty() ||
+                        relic.name.contains(q, ignoreCase = true) ||
+                        relic.description.contains(q, ignoreCase = true) ||
+                        relic.id.contains(q, ignoreCase = true))
+            }.sortedWith(compareByDescending<com.example.model.RelicTemplate> { it.rarity.ordinal }.thenBy { it.name })
+        }
+
         AlertDialog(
             onDismissRequest = { relicPickerSlot = null },
             containerColor = ObsidianSurface,
             title = {
-                Text("Trang Bị Cổ Vật — Ô ${slot + 1}", style = fantasyHeadingStyle(16.sp, HextechGoldBright))
+                Text(
+                    text = "Trang Bị Cổ Vật — Ô ${slot + 1} (${filteredRelics.size})",
+                    style = fantasyHeadingStyle(15.sp, HextechGoldBright)
+                )
             },
             text = {
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 360.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    item {
-                        OutlinedButton(
-                            onClick = {
-                                onEquipRelic(championId, slot, null)
-                                relicPickerSlot = null
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Tháo Cổ Vật", color = MutedSilver)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = { Text("Tìm tên hoặc hiệu ứng...", style = interBodyStyle(12.sp, MutedSilver)) },
+                        singleLine = true,
+                        leadingIcon = {
+                            Icon(Icons.Default.Search, contentDescription = "Tìm Cổ Vật", tint = MutedSilver, modifier = Modifier.size(18.dp))
+                        },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Xóa tìm kiếm", tint = MutedSilver, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = HextechGold,
+                            unfocusedBorderColor = SlateBorder,
+                            focusedTextColor = ParchmentWhite,
+                            unfocusedTextColor = ParchmentWhite
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        val rarityOptions = listOf(null to "Tất cả", Rarity.COMMON to "Thường", Rarity.RARE to "Hiếm", Rarity.EPIC to "Sử Thi")
+                        rarityOptions.forEach { (rarityVal, label) ->
+                            val active = selectedRarity == rarityVal
+                            val chipColor = rarityVal?.let { rarityColor(it) } ?: HextechGoldBright
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .minimumInteractiveComponentSize()
+                                    .clickable { selectedRarity = rarityVal },
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (active) chipColor.copy(alpha = 0.2f) else ObsidianCard,
+                                border = BorderStroke(1.dp, if (active) chipColor else SlateBorder.copy(alpha = 0.6f))
+                            ) {
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(vertical = 6.dp)) {
+                                    Text(
+                                        text = label,
+                                        style = fantasyHeadingStyle(10.sp, if (active) chipColor else MutedSilver),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
                         }
                     }
-                    items(CardCatalog.relics, key = { it.id }) { relic ->
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .minimumInteractiveComponentSize()
-                                .clickable {
-                                    onEquipRelic(championId, slot, relic.id)
+
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 320.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        item {
+                            OutlinedButton(
+                                onClick = {
+                                    onEquipRelic(championId, slot, null)
                                     relicPickerSlot = null
                                 },
-                            shape = RoundedCornerShape(10.dp),
-                            color = ObsidianCard,
-                            border = BorderStroke(1.dp, rarityColor(relic.rarity))
-                        ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text(
-                                    text = "${relic.name} (${relic.rarity.displayName})",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = rarityColor(relic.rarity)
-                                )
-                                Text(
-                                    text = relic.description,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MutedSilver
-                                )
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Tháo Cổ Vật", color = MutedSilver)
+                            }
+                        }
+                        items(filteredRelics, key = { it.id }) { relic ->
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .minimumInteractiveComponentSize()
+                                    .clickable {
+                                        onEquipRelic(championId, slot, relic.id)
+                                        relicPickerSlot = null
+                                    },
+                                shape = RoundedCornerShape(10.dp),
+                                color = ObsidianCard,
+                                border = BorderStroke(1.dp, rarityColor(relic.rarity))
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = "${relic.name} (${relic.rarity.displayName})",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = rarityColor(relic.rarity)
+                                    )
+                                    Text(
+                                        text = relic.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MutedSilver
+                                    )
+                                }
                             }
                         }
                     }

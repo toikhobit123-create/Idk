@@ -43,6 +43,7 @@ class GameRepository(
 
     suspend fun ensureSeeded() = withContext(ioDispatcher) {
         val allRelicIds = CardCatalog.relics.map { it.id }
+        val validRelicSet = allRelicIds.toSet()
         val existingMeta = dao.getPlayerMeta()
         if (existingMeta == null) {
             dao.upsertPlayerMeta(
@@ -58,21 +59,34 @@ class GameRepository(
                     )
                 )
             )
+        } else {
+            val domainMeta = existingMeta.toDomain()
+            val cleanedOwned = (domainMeta.ownedRelicIds.filter { it in validRelicSet } + allRelicIds).distinct()
+            if (cleanedOwned != domainMeta.ownedRelicIds) {
+                dao.upsertPlayerMeta(PlayerMetaEntity.fromDomain(domainMeta.copy(ownedRelicIds = cleanedOwned)))
+            }
         }
 
         val existingSaved = dao.getSavedRun()?.let { deserializeRunState(it.runJson) }
-        if (existingSaved != null &&
-            (CardCatalog.findChampionOrNull(existingSaved.championId) == null ||
-                com.example.model.AdventureCatalog.findAdventureOrNull(existingSaved.adventureId) == null)
-        ) {
-            dao.clearSavedRun()
+        if (existingSaved != null) {
+            if (CardCatalog.findChampionOrNull(existingSaved.championId) == null ||
+                com.example.model.AdventureCatalog.findAdventureOrNull(existingSaved.adventureId) == null
+            ) {
+                dao.clearSavedRun()
+            } else {
+                val validPowerIds = existingSaved.activePowerIds.filter { CardCatalog.findPowerOrNull(it) != null }
+                if (validPowerIds != existingSaved.activePowerIds) {
+                    dao.upsertSavedRun(SavedRunEntity(id = 1, runJson = serializeRunState(existingSaved.copy(activePowerIds = validPowerIds))))
+                }
+            }
         }
 
+        val defaultAniviaRelics = listOf("R0017", "R0082", "R0013")
         for (champ in CardCatalog.champions) {
             val existing = dao.getChampionLoadout(champ.id)
             if (existing == null) {
                 val initialRelics = if (champ.id == "champ_anivia") {
-                    listOf("relic_ludens_tempest", "relic_starforged", "relic_archangels_staff")
+                    defaultAniviaRelics
                 } else {
                     listOf(null, null, null)
                 }
@@ -89,6 +103,19 @@ class GameRepository(
                     cosmicForgedSlots = if (champ.id == "champ_anivia") 3 else 0
                 )
                 dao.upsertChampionLoadout(ChampionLoadoutEntity.fromDomain(loadout))
+            } else {
+                val domainLoadout = existing.toDomain()
+                val hasInvalidRelic = domainLoadout.equippedRelics.any { it != null && it !in validRelicSet }
+                if (hasInvalidRelic) {
+                    val migratedRelics = if (champ.id == "champ_anivia" &&
+                        domainLoadout.equippedRelics.all { it != null && it !in validRelicSet }
+                    ) {
+                        defaultAniviaRelics
+                    } else {
+                        domainLoadout.equippedRelics.map { id -> if (id != null && id in validRelicSet) id else null }
+                    }
+                    dao.upsertChampionLoadout(ChampionLoadoutEntity.fromDomain(domainLoadout.copy(equippedRelics = migratedRelics)))
+                }
             }
         }
     }

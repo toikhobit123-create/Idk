@@ -36,21 +36,39 @@ data class RelicTemplate(
     val bonusPower: Int = 0,
     val bonusHealth: Int = 0,
     val grantedKeyword: Keyword? = null,
+    val grantedKeywords: Set<Keyword> = emptySet(),
+    val impactStacks: Int = 0,
+    val spiritStacks: Int = 0,
+    val alliesGrantedKeywords: Set<Keyword> = emptySet(),
+    val alliesImpactStacks: Int = 0,
     val spellSkillDamageBonus: Int = 0,
+    val elementalSpellSkillDamageBonus: Int = 0,
     val strikeWeakestOnSummon: Boolean = false,
     val refillSpellManaRoundStart: Boolean = false,
+    val refillSpellManaOnPlay: Boolean = false,
     val attackGainPlusOnePlusOne: Boolean = false,
     val levelUpRally: Boolean = false,
     val startingManaBonus: Int = 0,
-    val createChampionSpellRoundStart: Boolean = false
-)
+    val createChampionSpellRoundStart: Boolean = false,
+    val nexusTough: Boolean = false,
+    val adventureMaxHpBonus: Int = 0,
+    val adventureRegenBonus: Int = 0,
+    val adventureStartingGoldBonus: Int = 0,
+    val adventureStartingRerollsBonus: Int = 0,
+    val adventureStartingRevivesBonus: Int = 0,
+    val goldMultiplierBonus: Double = 0.0
+) {
+    val allGrantedKeywords: Set<Keyword>
+        get() = if (grantedKeyword != null) grantedKeywords + grantedKeyword else grantedKeywords
+}
 
 data class PowerTemplate(
     val id: String,
     val name: String,
     val rarity: Rarity,
     val description: String,
-    val spellSkillDamageBonus: Int = 0
+    val spellSkillDamageBonus: Int = 0,
+    val trigger: PowerTrigger? = null
 )
 
 enum class CardEffectType {
@@ -84,7 +102,11 @@ enum class CardEffectType {
     FREE_ATTACK,
     RALLY,
     SACRIFICE_DAMAGE,
-    POSSESS_UNIT
+    POSSESS_UNIT,
+    BREAKOUT_EFFECT,
+    ASTRAL_DIFFUSION_EFFECT,
+    STANCE_SWAP_EFFECT,
+    BUFF_ALLIES_STATS
 }
 
 data class CardTemplate(
@@ -113,7 +135,9 @@ data class CardTemplate(
     val supportHealthBonus: Int = 0,
     val supportKeyword: Keyword? = null,
     val requiresAllySacrificeOnPlay: Boolean = false,
-    val isDragon: Boolean = false
+    val isDragon: Boolean = false,
+    val isPoro: Boolean = false,
+    val isDarkin: Boolean = false
 )
 
 data class DeckCardEntry(

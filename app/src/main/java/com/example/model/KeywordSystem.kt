@@ -25,10 +25,28 @@ enum class Region(
     SHADOW_ISLES("ShadowIsles", "Quần Đảo Bóng Đêm"),
     TARGON("Targon", "Targon"),
     NOXUS("Noxus", "Noxus"),
+    SHURIMA("Shurima", "Shurima"),
     RUNETERRA("Runeterra", "Runeterra");
 
     val displayName: String
         get() = LocalizationRepository.regionName(nameRef, defaultDisplayName)
+}
+
+enum class PowerTrigger {
+    GAME_START,
+    ROUND_START,
+    ROUND_END,
+    ON_ATTACK_TOKEN_GAINED,
+    ON_SUMMON_ALLY,
+    ON_PLAY_UNIT,
+    ON_PLAY_SPELL,
+    ON_PLAY_CREATED_CARD,
+    ON_TRAP_TRIGGERED,
+    ON_ENEMY_CREATE_CARD,
+    ON_ALLY_DEATH,
+    ON_CHAMPION_LEVEL_UP,
+    ON_COMBAT_VICTORY,
+    PASSIVE_AURA
 }
 
 enum class CardType(val displayName: String) {

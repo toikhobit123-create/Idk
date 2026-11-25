@@ -155,89 +155,20 @@ object CardCatalog {
         )
     )
 
-    val relics: List<RelicTemplate> = listOf(
-        RelicTemplate(
-            id = "relic_stalkers_blade",
-            name = "Kiếm Truy Sát",
-            rarity = Rarity.RARE,
-            description = "Khi được triệu hồi, ta đánh kẻ địch yếu nhất.",
-            strikeWeakestOnSummon = true
-        ),
-        RelicTemplate(
-            id = "relic_archangels_staff",
-            name = "Quyền Trượng Thiên Thần",
-            rarity = Rarity.RARE,
-            description = "Đầu Vòng Đấu: Hồi đầy Năng Lượng Phép.",
-            refillSpellManaRoundStart = true
-        ),
-        RelicTemplate(
-            id = "relic_ludens_tempest",
-            name = "Vọng Âm Của Luden",
-            rarity = Rarity.RARE,
-            description = "Mọi bài phép và Kỹ Năng của bạn gây thêm 1 sát thương.",
-            spellSkillDamageBonus = 1
-        ),
-        RelicTemplate(
-            id = "relic_guinsoos_rageblade",
-            name = "Cuồng Đao Guinsoo",
-            rarity = Rarity.COMMON,
-            description = "Tấn Công: Ban cho ta +1|+1.",
-            attackGainPlusOnePlusOne = true
-        ),
-        RelicTemplate(
-            id = "relic_crownguard",
-            name = "Di Sản Hoàng Tộc",
-            rarity = Rarity.RARE,
-            description = "Khi ta Thăng Cấp, Tập Hợp.",
-            levelUpRally = true
-        ),
-        RelicTemplate(
-            id = "relic_troll_kings_crown",
-            name = "Vương Miện Vua Quỷ Đá",
-            rarity = Rarity.RARE,
-            description = "Đồng minh có Áp Đảo.",
-            grantedKeyword = Keyword.OVERWHELM
-        ),
-        RelicTemplate(
-            id = "relic_banshees_veil",
-            name = "Dây Chuyền Chữ Thập",
-            rarity = Rarity.COMMON,
-            description = "Khiên Phép.",
-            grantedKeyword = Keyword.SPELLSHIELD
-        ),
-        RelicTemplate(
-            id = "relic_starforged",
-            name = "Găng Tay Rèn Sao",
-            rarity = Rarity.EPIC,
-            description = "+1|+3 và +1 Năng Lượng Khởi Điểm (tối đa 3 nếu chưa có Sức Mạnh thêm Năng Lượng).",
-            bonusPower = 1,
-            bonusHealth = 3,
-            startingManaBonus = 1
-        ),
-        RelicTemplate(
-            id = "relic_grand_generals",
-            name = "Kế Hoạch Đại Tướng",
-            rarity = Rarity.RARE,
-            description = "Đầu Vòng Đấu: Tạo 1 bản sao Chóng Tàn của Bài Phép Tướng trên tay.",
-            createChampionSpellRoundStart = true
-        )
-    )
+    val relics: List<RelicTemplate>
+        get() = RelicCatalog.all
 
     val powers: List<PowerTemplate> = listOf(
         PowerTemplate("pow_domination", "Thống Trị", Rarity.RARE, "Đầu Vòng Đấu: Tập Hợp (nhận Lệnh Tấn Công mỗi vòng)."),
-        PowerTemplate("pow_evolution", "Tiến Hóa Tối Thượng", Rarity.EPIC, "Đồng minh nhận +1|+1 cho mỗi từ khóa có lợi đang sở hữu."),
         PowerTemplate("pow_sorcery", "Pháp Thuật", Rarity.RARE, "Đầu Vòng Đấu: Hồi đầy Năng Lượng Phép."),
         PowerTemplate("pow_spellslinger", "Xạ Thủ Phép Thuật", Rarity.COMMON, "Bài phép của bạn giảm 1 tiêu hao."),
-        PowerTemplate("pow_trifarian_might", "Sức Mạnh Tam Cực", Rarity.EPIC, "Khi triệu hồi đồng minh có 5+ Sức Mạnh, nó đánh kẻ địch yếu nhất."),
-        PowerTemplate("pow_sharing_is_caring", "Sẻ Chia Sức Mạnh", Rarity.EPIC, "Khi triệu hồi đồng minh, ban từ khóa có lợi của nó cho toàn bộ đồng minh."),
         PowerTemplate("pow_wild_inspiration", "Cảm Hứng Hoang Dã", Rarity.COMMON, "Các lá bài được tạo ra của bạn giảm 1 tiêu hao."),
         PowerTemplate("pow_raiding_party", "Băng Cướp Kích", Rarity.COMMON, "Khi gây sát thương lên Nhà Chính địch, ban +1|+1 cho bài quân đầu tiên trên tay."),
         PowerTemplate("pow_enfeebling_strike", "Đòn Đánh Suy Nhược", Rarity.COMMON, "Khi gây sát thương lên bài quân địch, giảm Sức Mạnh của nó bằng lượng sát thương đó."),
-        PowerTemplate("pow_stabilize", "Ổn Định Không Gian", Rarity.EPIC, "Khi triệu hồi Tướng, triệu hồi thêm 1 bản sao Bóng Ma của Tướng đó."),
         PowerTemplate("pow_vitality", "Sinh Lực Dồi Dào", Rarity.RARE, "Bắt Đầu Trận Đấu & Đầu Vòng Đấu: Hồi 2 Máu cho Nhà Chính."),
         PowerTemplate("pow_manaflow", "Dòng Chảy Năng Lượng Hoàn Mỹ", Rarity.LEGENDARY, "Bắt Đầu Trận Đấu: Nhận +1 ngọc năng lượng (tối đa 10)."),
         PowerTemplate("pow_spell_fury", "Cuồng Nộ Pháp Thuật", Rarity.RARE, "Bài phép và Kỹ Năng của bạn gây thêm 1 sát thương.", spellSkillDamageBonus = 1)
-    )
+    ) + PowerCatalog.epicPowers
 
     val cards: Map<String, CardTemplate> = listOf(
         // Champions
@@ -319,7 +250,7 @@ object CardCatalog {
         CardTemplate(
             id = "card_sumpworks_mapper", name = "Poro Liều Lĩnh", region = Region.PILTOVER_ZAUN, type = CardType.UNIT,
             cost = 1, basePower = 1, baseHealth = 1, keywords = setOf(Keyword.ELUSIVE),
-            description = "Huyền Ảo."
+            description = "Huyền Ảo.", isPoro = true
         ),
         CardTemplate(
             id = "card_ballistic_bot", name = "Người Máy Đạn Đạo", region = Region.PILTOVER_ZAUN, type = CardType.UNIT,
@@ -603,12 +534,48 @@ object CardCatalog {
         CardTemplate(
             id = "card_forged_blade", name = "Kích Darkin", region = Region.DEMACIA, type = CardType.EQUIPMENT,
             cost = 2, basePower = 2, baseHealth = 1, keywords = setOf(Keyword.CHALLENGER),
-            description = "Trang Bị. Ban +2|+1 và Thách Đấu cho đồng minh mạnh nhất."
+            description = "Trang Bị Darkin. Ban +2|+1 và Thách Đấu cho đồng minh mạnh nhất.",
+            isDarkin = true, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_taarosh", name = "Taarosh", region = Region.SHADOW_ISLES, type = CardType.UNIT,
+            cost = 10, basePower = 8, baseHealth = 8, keywords = setOf(Keyword.OVERWHELM),
+            description = "Darkin, Áp Đảo.", isDarkin = true, rarity = Rarity.EPIC
         ),
         CardTemplate(
             id = "card_sun_disc", name = "Đài Quan Sát Hextech", region = Region.PILTOVER_ZAUN, type = CardType.LANDMARK,
             cost = 2, countdownRounds = 2,
             description = "Địa Danh. Đếm Ngược 2: Rút 2 lá và hồi 2 Năng Lượng Phép."
+        ),
+        CardTemplate(
+            id = "card_hextech_observatory", name = "Đài Quan Sát Hextech", region = Region.PILTOVER_ZAUN, type = CardType.LANDMARK,
+            cost = 3, countdownRounds = 0,
+            description = "Địa Danh. Đầu Vòng Đấu: Nếu bạn có Lượt Tấn Công, rút 1 lá.",
+            isCollectibleReward = false, rarity = Rarity.RARE
+        ),
+        CardTemplate(
+            id = "card_buried_sun_disc", name = "Đĩa Mặt Trời Chôn Vùi", region = Region.SHURIMA, type = CardType.LANDMARK,
+            cost = 1, countdownRounds = 25,
+            description = "Địa Danh. Đếm Ngược 25: Khôi phục Đĩa Mặt Trời và Thăng Cấp các Tướng Shurima. Khi Tướng Shurima Thăng Cấp, đẩy nhanh 10 vòng.",
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_ancient_preparations", name = "Chuẩn Bị Cổ Xưa", region = Region.SHURIMA, type = CardType.LANDMARK,
+            cost = 1, countdownRounds = 2,
+            description = "Địa Danh. Đếm Ngược 2: Rút 1 lá.",
+            rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_hibernating_rockbear", name = "Gấu Đá Ngủ Đông", region = Region.SHURIMA, type = CardType.LANDMARK,
+            cost = 2, countdownRounds = 3,
+            description = "Địa Danh. Đếm Ngược 3: Triệu hồi 1 Gấu Đá Khổng Lồ (5|4).",
+            rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_grumpy_rockbear", name = "Gấu Đá Khổng Lồ", region = Region.SHURIMA, type = CardType.UNIT,
+            cost = 5, basePower = 5, baseHealth = 4, keywords = emptySet(),
+            description = "Mãnh thú đá cổ đại vùng Shurima.",
+            isCollectibleReward = false, rarity = Rarity.COMMON
         ),
 
         // Bài Lời Nguyền & Token
@@ -689,9 +656,9 @@ object CardCatalog {
             isCollectibleReward = false, rarity = Rarity.EPIC
         ),
         CardTemplate(
-            id = "card_tough_poro", name = "Poro", region = Region.DEMACIA, type = CardType.UNIT,
+            id = "card_tough_poro", name = "Poro Kiên Cường", region = Region.DEMACIA, type = CardType.UNIT,
             cost = 1, basePower = 1, baseHealth = 1, keywords = setOf(Keyword.TOUGH),
-            description = "Kiên Cường.",
+            description = "Kiên Cường.", isPoro = true,
             isCollectibleReward = false, rarity = Rarity.COMMON
         ),
         CardTemplate(
@@ -776,6 +743,121 @@ object CardCatalog {
             keywords = setOf(Keyword.FEARSOME),
             description = "Đáng Sợ. Khi ra sân hoặc Bắt Đầu Vòng Đấu, triệu hồi 1 Màn Sương Xâm Chiếm.",
             isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        // --- BỔ SUNG CHO 55 POWER SỬ THI ---
+        CardTemplate(
+            id = "card_renekton", name = "Renekton", region = Region.SHURIMA, type = CardType.CHAMPION,
+            cost = 4, basePower = 4, baseHealth = 4, keywords = setOf(Keyword.OVERWHELM),
+            isChampion = true, levelUpRequirementText = "Gây 12+ sát thương",
+            description = "Áp Đảo. Tấn Công: Nhận +2|+1 khi Thăng Cấp.",
+            levelUpPowerBonus = 1, levelUpHealthBonus = 1,
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_azir", name = "Azir", region = Region.SHURIMA, type = CardType.CHAMPION,
+            cost = 3, basePower = 1, baseHealth = 5, keywords = emptySet(),
+            isChampion = true, levelUpRequirementText = "Triệu hồi 10+ đồng minh hoặc Địa Danh",
+            description = "Khi đồng minh tấn công, triệu hồi 1 Lính Cát (1|1, Cảm Tử) đang tấn công.",
+            levelUpPowerBonus = 1, levelUpHealthBonus = 1,
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_nasus", name = "Nasus", region = Region.SHURIMA, type = CardType.CHAMPION,
+            cost = 6, basePower = 2, baseHealth = 2, keywords = setOf(Keyword.FEARSOME),
+            isChampion = true, levelUpRequirementText = "Đã tiêu diệt kẻ địch (10+ Sức Mạnh)",
+            description = "Đáng Sợ. Có +1|+1 với mỗi kẻ địch bạn đã tiêu diệt trong trận. Thăng Cấp: Nhận Khiên Phép.",
+            levelUpPowerBonus = 1, levelUpHealthBonus = 1,
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_galio", name = "Galio", region = Region.DEMACIA, type = CardType.CHAMPION,
+            cost = 7, basePower = 0, baseHealth = 8, keywords = setOf(Keyword.FORMIDABLE, Keyword.SPELLSHIELD),
+            isChampion = true, levelUpRequirementText = "Đồng minh có tổng 25+ Máu",
+            description = "Uy Dũng, Khiên Phép. Xuất Trận: Ban +0|+3 cho đồng minh.",
+            levelUpPowerBonus = 0, levelUpHealthBonus = 4,
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_sand_soldier", name = "Lính Cát", region = Region.SHURIMA, type = CardType.UNIT,
+            cost = 1, basePower = 1, baseHealth = 1, keywords = setOf(Keyword.EPHEMERAL),
+            description = "Cảm Tử. Khi tấn công, gây 1 sát thương lên Nhà Chính địch.",
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_sapling", name = "Chồi Non", region = Region.SHADOW_ISLES, type = CardType.UNIT,
+            cost = 1, basePower = 2, baseHealth = 1, keywords = setOf(Keyword.CHALLENGER, Keyword.EPHEMERAL),
+            description = "Thách Đấu, Phù Du.",
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_caustic_cask", name = "Thùng Thuốc Độc", region = Region.PILTOVER_ZAUN, type = CardType.UNIT,
+            cost = 0, basePower = 0, baseHealth = 1, keywords = setOf(Keyword.EPHEMERAL),
+            description = "Phù Du. Trăn Trối: Gây 1 sát thương lên cả 2 Nhà Chính.",
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_lonely_poro", name = "Poro Cô Đơn", region = Region.FRELJORD, type = CardType.UNIT,
+            cost = 1, basePower = 1, baseHealth = 1, keywords = emptySet(),
+            description = "Poro nhỏ bé vùng Freljord.", isPoro = true,
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_nimble_poro", name = "Poro Nhanh Nhẹn", region = Region.IONIA, type = CardType.UNIT,
+            cost = 1, basePower = 1, baseHealth = 1, keywords = setOf(Keyword.QUICK_ATTACK),
+            description = "Tấn Công Nhanh.", isPoro = true,
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_animated_spell", name = "Phép Thuật Hoạt Hóa", region = Region.RUNETERRA, type = CardType.UNIT,
+            cost = 1, basePower = 1, baseHealth = 1, keywords = emptySet(),
+            description = "Đơn vị được hoạt hóa từ bài phép.",
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_hex_core_upgrade", name = "Lõi Công Nghệ Nâng Cấp", region = Region.PILTOVER_ZAUN, type = CardType.SPELL,
+            cost = 1, spellSpeed = SpellSpeed.BURST,
+            description = "Siêu Tốc. Ban 1 từ khóa có lợi ngẫu nhiên cho đồng minh.",
+            effectType = CardEffectType.BUFF_ALLIES_STATS, effectValue = 0,
+            isCollectibleReward = false, rarity = Rarity.COMMON
+        ),
+        CardTemplate(
+            id = "card_cythria_the_bold", name = "Cithria Hùng Mạnh", region = Region.DEMACIA, type = CardType.UNIT,
+            cost = 6, basePower = 6, baseHealth = 6, keywords = setOf(Keyword.FEARSOME),
+            description = "Đáng Sợ. Khi tấn công, ban +1|+1 và Đáng Sợ cho đồng minh khác.",
+            rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_scarmother_vrynna", name = "Vrynna Mẹ Sẹo", region = Region.FRELJORD, type = CardType.UNIT,
+            cost = 6, basePower = 3, baseHealth = 8, keywords = setOf(Keyword.OVERWHELM),
+            description = "Áp Đảo. Chiến binh bất khuất phương Bắc.",
+            rarity = Rarity.RARE
+        ),
+        CardTemplate(
+            id = "card_windfarer_hatchling", name = "Rồng Gió Non", region = Region.IONIA, type = CardType.UNIT,
+            cost = 7, basePower = 4, baseHealth = 2, keywords = setOf(Keyword.ELUSIVE),
+            description = "Huyền Ảo. Xuất Trận: Ban +2|+2 cho đồng minh trong vòng này.",
+            rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_breakout", name = "Vượt Ngục!", region = Region.RUNETERRA, type = CardType.SPELL,
+            cost = 2, spellSpeed = SpellSpeed.FOCUS,
+            description = "Tập Trung. Ban +2|+0 và Áp Đảo cho toàn bộ đồng minh trong vòng này.",
+            effectType = CardEffectType.BREAKOUT_EFFECT, effectValue = 2,
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_astral_diffusion", name = "Khuếch Tán Tinh Tú", region = Region.TARGON, type = CardType.SPELL,
+            cost = 5, spellSpeed = SpellSpeed.SLOW,
+            description = "Chậm. Ban +2|+2 và 1 từ khóa ngẫu nhiên cho toàn bộ đồng minh.",
+            effectType = CardEffectType.ASTRAL_DIFFUSION_EFFECT, effectValue = 2,
+            isCollectibleReward = false, rarity = Rarity.EPIC
+        ),
+        CardTemplate(
+            id = "card_stance_swap", name = "Đổi Thế Võ", region = Region.FRELJORD, type = CardType.SPELL,
+            cost = 3, spellSpeed = SpellSpeed.SLOW,
+            description = "Chậm. Chọn 1 đồng minh để ban +2|+2 và Áp Đảo.",
+            effectType = CardEffectType.STANCE_SWAP_EFFECT, effectValue = 2,
+            rarity = Rarity.COMMON
         )
     ).associateBy { it.id }
 
